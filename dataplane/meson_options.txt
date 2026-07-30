@@ -1,0 +1,5 @@
+option('march',
+  type: 'string',
+  value: 'x86-64-v3',
+  description: '타깃 마이크로아키텍처 baseline. 빈 문자열이면 컴파일러 기본값. ' +
+               'native 는 쓰지 말 것 — 다른 CPU 에서 SIGILL 로 죽는다.')

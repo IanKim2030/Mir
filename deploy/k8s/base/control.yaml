@@ -1,0 +1,100 @@
+# 제어부 — 데이터플레인과 **별도 파드**여야 한다.
+#
+# 개수·리소스 변경은 어떤 경우에도 데이터플레인 재시작을 수반한다. 같은 파드였다면
+# 제어부가 자기 자신을 죽이는 명령을 내리게 되어 GUI 세션과 진행 중인 테스트
+# 결과가 함께 날아간다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mir-control
+  labels:
+    app: mir-control
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mir-control
+  template:
+    metadata:
+      labels:
+        app: mir-control
+    spec:
+      serviceAccountName: mir-control
+
+      # 배타 코어를 쓰지 않는다. 예약 코어(공유 풀)에서 돌기 때문에
+      # 데이터플레인의 busy-poll 을 방해하지 않는다.
+      containers:
+        - name: control
+          image: mir/control:dev
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: MIR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MIR_DATAPLANE_DEPLOYMENT
+              value: mir-dataplane
+            - name: MIR_DATAPLANE_SERVICE
+              value: mir-dataplane
+            - name: MIR_DATAPLANE_SELECTOR
+              value: app=mir-dataplane
+            - name: MIR_DATAPLANE_GRPC_PORT
+              value: "9100"
+            # device plugin 리소스명. 오버레이가 리소스명을 바꾸면
+            # 여기도 함께 바꿔야 상한 검증이 맞는다.
+            - name: MIR_PF_RESOURCE
+              value: mir.io/dpdk_pf
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+
+          volumeMounts:
+            # 제어부가 업로드받은 PCAP 을 여기 쓰고, 데이터플레인은 RO 로 읽는다.
+            - name: pcap
+              mountPath: /var/lib/mir/pcap
+
+      volumes:
+        - name: pcap
+          persistentVolumeClaim:
+            claimName: mir-pcap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mir-control
+  labels:
+    app: mir-control
+spec:
+  type: NodePort
+  selector:
+    app: mir-control
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # 헤드리스 100G 서버에 브라우저로 붙기 위한 고정 포트.
+      nodePort: 30080

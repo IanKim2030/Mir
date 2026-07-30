@@ -1,0 +1,43 @@
+# mir-agent — 데이터플레인 파드의 사이드카 컨테이너.
+#
+# 빌드 컨텍스트는 **저장소 루트**다:
+#   docker build -f deploy/docker/Dockerfile.agent -t mir/agent:dev .
+#
+# 이 컨테이너가 gRPC 를 담당하는 덕분에 C 데이터플레인이 순수 C 로 남는다.
+# 그리고 별도 컨테이너 = 별도 cpuset 이므로, gRPC 런타임 스레드가 DPDK 의
+# 배타 코어에 올라갈 물리적 경로가 없다.
+
+ARG GO_VERSION=1.26
+
+# ─────────────────────────────────────────────────────────────
+FROM golang:${GO_VERSION} AS builder
+
+WORKDIR /src
+
+# 의존성 레이어를 소스와 분리해 캐시를 살린다.
+COPY control/go.mod control/go.sum ./
+RUN go mod download
+
+COPY control/ ./
+
+# CGO 를 끈 정적 바이너리라야 distroless/static 에서 돈다.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w" \
+        -o /out/mir-agent ./cmd/mir-agent
+
+# ─────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/mir-agent /mir-agent
+
+# 사이드카는 특권이 전혀 필요 없다. unix socket 접근은 파드
+# securityContext 의 fsGroup(65532)으로 해결한다 — deploy/k8s/base/dataplane.yaml 참조.
+USER nonroot:nonroot
+
+ENV MIR_IPC_SOCKET=/var/run/mir/dp.sock \
+    MIR_GRPC_LISTEN=:9100
+
+EXPOSE 9100
+
+ENTRYPOINT ["/mir-agent"]

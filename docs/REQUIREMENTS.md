@@ -80,21 +80,21 @@ C 데이터플레인과 Go 제어부를 **별도 프로세스**로 두고 아래
 [React + TypeScript GUI]
         │ WebSocket / REST
         ▼
-[Go Control Plane]
-  - 시나리오 엔진
-  - 규칙 엔진
-  - 상태 머신
+[제어부 파드 — mir-control (Go)]
+  - 시나리오 엔진 / 규칙 엔진 / 상태 머신
   - 텔레메트리 집계
   - 백엔드 선택/환경 감지
-        │ unix socket / shared memory ring
+  - 데이터플레인 개수·리소스 조정 (k8s API)
+        │ ④ gRPC (스트리밍)
         ▼
-[C Data Plane / DPDK]
-  - NIC bind
-  - 패킷 빌더
-  - TX/RX 루프
-  - 실시간 판정
-  - 응답 캡처
+[데이터플레인 파드 × N — NIC PF 하나당 파드 하나]
+  ├─ agent (Go 사이드카)   ── ③ unix socket ──┐   공유 풀 코어
+  └─ dataplane (C/DPDK)  ◀───────────────────┘   배타 코어
+       - NIC bind / 패킷 빌더 / TX/RX 루프
+       - 실시간 판정 / 응답 캡처
 ```
+
+**채널 번호는 4-2-4 및 `proto/dataplane.proto` 와 일치한다.**
 
 ### 4-2-3. 모듈 분해
 - **C 데이터플레인**
@@ -111,9 +111,35 @@ C 데이터플레인과 Go 제어부를 **별도 프로세스**로 두고 아래
   - 실시간 차트, 패킷 로그, 세션 상태 패널
 
 ### 4-2-4. 주요 인터페이스
+
+논리 채널은 셋이다.
+
 - **Command Channel**: 시나리오 시작/중지/재시작, 설정 변경
 - **Telemetry Channel**: pps, tx bytes, rx bytes, 응답 플래그, 세션 상태
 - **Rule Channel**: PASS/FAIL 판정 조건 전달
+
+물리적으로는 다섯 구간으로 나뉜다. 스키마는 `proto/dataplane.proto` 하나가
+두 hop(③④)을 모두 정의한다.
+
+| # | 구간 | 방식 | 핵심 |
+|---|---|---|---|
+| ① | worker lcore → 제어 스레드 | per-lcore 카운터 | 캐시라인 정렬 필수. 단일 writer 라 락·원자연산 불필요 |
+| ② | worker lcore → 제어 스레드 | `rte_ring` (lock-free MPSC) | full 이면 **버리고** drop 카운터만 증가. worker 는 절대 블로킹 안 함 |
+| ③ | C ⇄ 사이드카 (파드 내부) | unix socket + protobuf-c | 4바이트 length-prefix. 네트워크가 아니라 재연결·백프레셔 문제가 거의 없다 |
+| ④ | 사이드카 ⇄ 제어부 (파드 간) | **gRPC** 스트리밍 | headless Service EndpointSlice 로 자동 연결/해제 |
+| ⑤ | 벌크 데이터 | 공유 볼륨 (PV) | PCAP 은 GB 단위 → **경로 문자열만** 전달 |
+
+**개별 패킷(mbuf)은 프로세스 경계를 넘지 않는다.** 148 Mpps 를 밖으로 내보내는
+건 성립하지 않으므로 C 가 판정 결과와 요약만 만든다. µs 단위 반응(ACK 생략,
+SYN-ACK 즉시 판정)은 전부 worker lcore 안에서 끝나므로, ③④가 지연되거나 끊겨도
+판정 정확도에 영향이 없다.
+
+**gRPC 를 C 에 직접 넣지 않는 이유는 성능이 아니라 격리다.** 이 채널의 부하는
+텔레메트리 10 msg/s, 이벤트 상한 10k/s 로 gRPC 용량 대비 3~4자릿수 여유다.
+C 프로세스에 gRPC 스레드 풀이 생기면 컨테이너 cpuset(= worker 코어 포함)을 떠돌며
+busy-poll 루프를 선점할 수 있는데, 사이드카는 별도 컨테이너라 애초에 worker 코어에
+올라갈 물리적 경로가 없다. 규약이 아니라 구조로 막는 쪽을 택했다.
+부수적으로 C 데이터플레인이 순수 C 로 남는다(libstdc++·abseil·BoringSSL 불필요).
 
 ### 4-2-5. 설계상 핵심 결정
 1. **Stateless 모드**는 100G급 전송에 최적화하고, **Stateful 모드**는 실제 세션/프로토콜 제어에 집중한다.
@@ -157,11 +183,87 @@ C 데이터플레인과 Go 제어부를 **별도 프로세스**로 두고 아래
 | **A. Stateless 고속** | 대량 트래픽 생성, L2~L4 이상동작 | 무상태 | **100G line rate** | L2~L4 |
 | **B. Stateful 세션** | 실제 TLS+HTTP, handshake 제어 | 세션 유지 | 훨씬 낮음 (세션 수 제한) | L2~L7 |
 
+## 4-3. 배포 아키텍처 (컨테이너 / k8s)
+
+**확정**: 베어메탈 1대에 단일 노드 k8s(k3s)를 세우고, 제어부 파드 1개와
+데이터플레인 파드 N개(NIC PF 하나당 1개)로 운영한다.
+절차는 [DEPLOYMENT.md](DEPLOYMENT.md), 환경별 차이는
+[deploy/k8s/overlays/README.md](../deploy/k8s/overlays/README.md).
+
+### 4-3-1. 계층 경계
+
+컨테이너화의 목적은 성능이 아니라 **재현성**이다. 다만 hugepage 크기·IOMMU·vfio
+바인딩·CPU 격리는 호스트 커널에 묶여 있어 컨테이너가 숨겨주지 못한다.
+
+| 계층 | 담당 | 컨테이너가 못 하는 일 |
+|---|---|---|
+| 호스트 | BIOS VT-d, 커널 cmdline, vfio-pci 바인딩, hugetlbfs | — |
+| k8s 노드 | CPU Manager `static`, Topology Manager `single-numa-node`, reserved CPUs | 호스트 커널 설정 변경 |
+| k8s 워크로드 | 스케줄링, PF 할당, hugepage 할당량, 코어 배타 점유 | IOMMU·hugepage **생성** |
+
+### 4-3-2. 핵심 결정
+
+1. **PF 전체를 vfio-pci 로 패스스루**한다. VF 는 PF 의 spoof check / MAC 필터에
+   막혀 L2 임의조작·src IP 스푸핑이 불가능한데, 그건 이 프로젝트의 핵심 기능이다.
+   PF 는 netdev 가 아니라 문자 장치(`/dev/vfio/N`)이므로 **Multus 는 불필요**하고
+   SR-IOV Device Plugin 하나로 끝난다.
+2. **코어 배치는 cpu 표기로 갈린다.** k8s QoS 는 파드 단위라 두 컨테이너 모두
+   `requests == limits` 여야 Guaranteed 가 되고, 그 위에서 CPU Manager static 은
+   **정수 cpu 를 요청한 컨테이너에만** 배타 코어를 준다.
+   → `dataplane: "5"` / `agent: "500m"` 조합이 사이드카를 공유 풀에 남긴다.
+3. **비특권 실행.** vfio-pci + IOMMU 면 `IPC_LOCK`(+`SYS_NICE`)만으로 동작한다.
+   VT-d 를 못 켜는 경우에만 no-IOMMU 폴백 + `privileged: true` 로 분기하며,
+   그 대가(임의 물리 메모리 DMA 가능 → 격리 경계 소멸)를 문서에 명시한다.
+
+### 4-3-3. 개수·리소스 조정
+
+GUI 에서 데이터플레인 개수와 CPU/메모리를 조정할 수 있어야 한다.
+다만 **"무중단 변경"은 달성 불가능**하다 — 세 겹의 제약이 겹친다.
+
+1. Pod 의 `spec.containers` 는 불변 → 컨테이너 개수 변경 = Pod 재생성
+2. in-place resize(k8s 1.33 beta)는 **static CPU manager + Guaranteed 조합에서
+   `Infeasible`**. `hugepages-*` 와 확장 리소스는 애초에 resize 대상이 아니다
+3. **DPDK 가 런타임 lcore 변경을 지원하지 않는다** — `rte_eal_init` 이 lcore 집합을
+   프로세스 생존 기간 동안 고정한다
+
+따라서 목표는 "무중단"이 아니라 **재시작 범위를 데이터플레인으로만 한정**하는
+것이고, 이것이 제어부를 별도 파드에 두어야 하는 이유다(같은 파드였다면 제어부가
+자기 자신을 죽이는 명령을 내리게 된다).
+
+| 요구 | 실현 | 제어부·GUI 영향 |
+|---|---|---|
+| 개수 설정 | `Deployment/scale` patch | 없음 |
+| CPU/메모리 설정 | pod template patch → 데이터플레인만 롤링 재생성 | 없음 |
+| 개별 재시작 | 해당 Pod delete | 없음 |
+
+두 가지 함정을 설계에 못박아 둔다.
+
+- **`maxSurge: 0` 필수.** PF 는 배타 자원이라 기본값(25%)이면 새 파드가 PF 를
+  못 받아 영원히 `Pending` 에 머문다. 먼저 죽여야 반납된다.
+- **개수 상한 검증은 API 단계에서.** `replicas > allocatable["mir.io/dpdk_pf"]` 를
+  통과시키면 초과분이 조용히 `Pending` 에 쌓여, 사용자가 파드 이벤트를 뒤져야
+  원인을 알게 된다.
+
+### 4-3-4. 클라우드 이식성
+
+매니페스트를 `base` + `overlays/<env>` 로 분리하고, 오버레이가 덮어쓰는 대상을
+**hugepage 크기 · securityContext · device plugin 리소스명 · replicas** 넷으로
+한정한다(4-1 절의 "백엔드 추상화" 원칙을 매니페스트 층에 적용한 것).
+
+- **AWS/GCP**: 같은 vfio-pci 모델 → vendor ID 만 바꿔 재사용 가능. 단 IOMMU 지원
+  인스턴스는 `*.metal` 계열뿐이라 그 외에는 특권 파드가 강제된다
+- **Azure**: 모델이 다르다. netvsc + bifurcated 드라이버 구조라 **netdev 를 파드
+  netns 에 넣어야** 하므로 Multus 가 필요해지고, MANA PMD 는 BDF 가 아니라
+  **MAC 주소**로 바인딩 대상을 정한다 → `eal_args.h` 의 `DEVICE_SPEC_MAC_ADDR`
+  경로를 미리 열어 둔 이유
+- **권고**: 성능 검증 환경은 `*.metal` 로 통일한다. 일반 인스턴스는 기능 테스트용
+
 ## 6. 현실적 개발 로드맵 (단계별)
 
 B안은 큰 프로젝트라 **작동하는 결과물을 단계마다** 만드는 순서로 갑니다.
 
 - **Phase 0 — 환경/하드웨어 확정**: NIC 모델·DPDK PMD 확인, hugepage/CPU 코어 세팅
+  + **컨테이너/k8s 인프라 골격** (4-3 절). *골격 작성 완료, 실물 검증 대기*
 - **Phase 1 — DPDK "hello packet"**: 단일 커스텀 패킷 1개 송신 성공 (파이프라인 검증)
 - **Phase 2 — L2~L4 커스텀 + 고속 송신**: 헤더 빌더 + 멀티코어 폭풍 전송, pps 측정
 - **Phase 3 — 수신 캡처 + 판정 엔진**: 응답 스니핑, 규칙 판정, 기본 리포트
@@ -175,8 +277,20 @@ B안은 큰 프로젝트라 **작동하는 결과물을 단계마다** 만드는
 
 문서 확정 전 답이 필요한 항목. 추정으로 채우지 않고 별도 관리.
 
-1. ~~베어메탈 NIC 하드웨어~~ — **확정: Intel 전용** (100G E810=ice PMD, 40G XL710=i40e PMD). 정확한 모델만 추후 확인.
-2. **서버 사양** — CPU 코어 수, 소켓/NUMA 구성, RAM, hugepage 확보 가능 여부
+1. ~~베어메탈 NIC 하드웨어~~ — **확정: Intel 전용** (100G E810=ice PMD, 40G XL710=i40e PMD).
+   - 후보로 검토됨: **CASwell NIP-83040** (Intel XL710-BM1, 4×SFP+ 10GbE = 40G, PCIe Gen3 x8).
+     i40e PMD 라 코드 변경 없이 붙지만 **40G 상한**이라 100G 최종 검증에는 부족하고,
+     독자 폼팩터(CASwell 섀시 전용)라 표준 랙에 들어가지 않는다.
+     → **개발·검증기로는 적합**, 100G 성능 검증기는 E810 이 별도로 필요.
+   - **미확정: PF 개수 N** — `replicas` 상한과 `hugepages=` 값이 여기서 결정된다.
+2. **서버 사양** — 아래 값이 확정돼야 배포 설정을 채울 수 있다.
+
+   | 항목 | 어디에 쓰이는가 |
+   |---|---|
+   | 물리 코어 수, HT 사용 여부 | `isolcpus` 범위, kubelet `reserved-cpus`, 파드 `cpu` 요청값 |
+   | 소켓/NUMA 구성 + **NIC 이 붙은 소켓** | Topology Manager `single-numa-node` 정렬 대상 |
+   | RAM | 1GB hugepage 개수 (`hugepages=`) = 파드 수 × 파드당 hugepage |
+   | BIOS 의 VT-d 지원 여부 | 비특권 파드 가능 여부. 없으면 no-IOMMU + privileged 로 분기 |
 3. **대상 환경** — 실장비 직결인지, 루프백/테스트베드인지, 스위치 경유인지
 3-1. ~~클라우드 우선순위~~ — **확정: AWS → Azure → GCP** 순서로 지원
 4. **판정 규칙 상세** — 어떤 조건을 PASS/FAIL로 볼지 목록화 필요

@@ -1,0 +1,20 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # 파일이 하나뿐이라 mir/v1/ 디렉터리 계층을 만들지 않는다.
+    # protoc-c 가 --c_out 아래에 같은 계층을 만들어 meson custom_target 의
+    # output 경로와 어긋나기 때문 (meson 은 output 에 하위 디렉터리를 못 쓴다).
+    - PACKAGE_DIRECTORY_MATCH
+    # Ack 하나를 여러 RPC 의 응답으로 재사용한다. RPC 마다 빈 래퍼 메시지를
+    # 만드는 것보다 C 생성 코드가 단순해진다.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_RESPONSE_STANDARD_NAME
+    # service DataPlane 이 "DataPlaneService" 보다 읽기 좋다.
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE
