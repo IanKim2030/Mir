@@ -1,10 +1,14 @@
 # 배포 가이드 — 베어메탈 단일 노드 k8s
 
 Mir 데이터플레인(C/DPDK)과 제어부(Go)를 베어메탈 한 대의 단일 노드 k8s 위에
-올리는 전체 절차.
+올리는 전체 절차. 요구사항 정의서의 **K 형태**([REQUIREMENTS.md](REQUIREMENTS.md) 4-3)다.
 
-> **현재 범위**: Phase 0. 컨테이너 안에서 `rte_eal_init` 이 성공하고 NIC 포트가
-> 인식되는 지점까지가 완료 기준이다. TX/RX 송신 엔진은 Phase 1 이후다.
+> **k8s 없이** 장비에 직접 설치하려면(**S 형태**) → [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md).
+> 1절 호스트 준비까지는 두 형태가 동일하고, k3s 설치 지점부터 갈린다.
+
+> **현재 범위**: 컨테이너 안에서 `rte_eal_init` 이 성공하고 NIC 포트가 인식·start 되며,
+> hello packet 이 선로에 나가는 지점까지(Phase 1)가 완료 기준이다.
+> 시나리오 송신 엔진은 Phase 2 이후다.
 
 ---
 
@@ -183,11 +187,13 @@ kubectl get node -o jsonpath='{.items[0].status.allocatable}' | tr ',' '\n'
 # hugepages-1Gi 와 mir.io/dpdk_pf 가 보여야 한다
 ```
 
-### 3단계 — 데이터플레인 컨테이너 (완료 기준)
+### 3단계 — 데이터플레인 컨테이너 (Phase 0 완료 기준)
 
 ```bash
 kubectl -n mir logs deploy/mir-dataplane -c dataplane
-#   rte_eal_init 성공, port N개 인식 로그가 나와야 한다
+#   rte_eal_init 성공, port N개 인식,
+#   "port N 준비 완료: rxq=1(...) txq=1(...)" 로그가 나와야 한다
+#   그 뒤 링크 상태 한 줄 — "Link up at 100 Gbps FDX Autoneg" 형태
 
 kubectl -n mir exec deploy/mir-dataplane -c dataplane -- \
     cat /sys/fs/cgroup/cpuset.cpus.effective     # 배타 코어 5개
@@ -202,6 +208,49 @@ kubectl -n mir describe pod -l app=mir-dataplane | grep -i qos    # Guaranteed
 kubectl -n mir exec deploy/mir-dataplane -c dataplane -- \
     python3 /usr/local/bin/dpdk-devbind.py --status
 ```
+
+### 3-1단계 — hello packet 송신 (Phase 1 완료 기준)
+
+`MIR_HELLO_TX_COUNT` 가 설정된 경우에만 기동 직후 1회 송신한다. 기본값은 0 —
+**파드가 뜨기만 해도 선로에 프레임이 나가는 상황을 만들지 않기 위해** 매니페스트에
+넣지 않고 검증할 때만 켠다.
+
+| 환경변수 | 기본값 | 뜻 |
+|---|---|---|
+| `MIR_HELLO_TX_COUNT` | `0`(비활성) | 보낼 패킷 수 |
+| `MIR_HELLO_TX_PORT`  | `0` | 대상 포트 id (`probe` 로그의 port 번호) |
+| `MIR_HELLO_DST_MAC`  | 브로드캐스트 | 목적지 MAC. 직결이면 상대 NIC 의 MAC 을 주는 편이 낫다 |
+| `MIR_HELLO_PKT_SIZE` | `64` | FCS 제외 프레임 길이 (30~1514 로 클램프) |
+| `MIR_HELLO_BURST`    | `32` | `tx_burst` 한 번에 넣는 개수 (1~512) |
+
+```bash
+kubectl -n mir set env deploy/mir-dataplane -c dataplane MIR_HELLO_TX_COUNT=1000
+kubectl -n mir logs deploy/mir-dataplane -c dataplane | grep hello
+#   hello 송신 완료: 1000/1000 전송, 0 폐기 (64000 bytes)
+
+# 검증이 끝나면 반드시 되돌린다
+kubectl -n mir set env deploy/mir-dataplane -c dataplane MIR_HELLO_TX_COUNT-
+```
+
+프레임은 EtherType **0x88B5**(IEEE 로컬 실험용) 이고 페이로드는 `MIR1` +
+be32 seq + be64 송신시각(ns) 으로 시작한다. 상대 장비/미러 포트에서:
+
+```bash
+tcpdump -i <if> -XX 'ether proto 0x88b5'
+```
+
+**"전송 완료" 로그만으로는 부족하다.** 그건 큐에 넣는 데 성공했다는 뜻이지
+선로에 나갔다는 뜻이 아니다. 아래 둘 중 하나로 NIC 카운터까지 확인할 것:
+
+```bash
+# 텔레메트리(하드웨어 카운터를 그대로 싣는다)
+grpcurl -plaintext localhost:9100 mir.v1.DataPlane/StreamTelemetry | head
+
+curl -s localhost:8080/api/dataplanes | jq '.[].stats'
+```
+
+`tx_pkts` 가 보낸 수와 맞지 않거나 `tx_err` 가 늘면 링크·MTU·오프로드를 의심한다.
+`폐기` 가 0 이 아니면 링크가 down 이거나 TX 디스크립터 회수가 막힌 것이다.
 
 ### 4단계 — 코어 분리 (사이드카 설계의 핵심 검증)
 
@@ -290,6 +339,7 @@ docker run --rm -it \
   -v mir-ipc:/var/run/mir \
   --cap-add IPC_LOCK --cap-add SYS_NICE \
   -e MIR_DEVICE_SPEC=pci:0000:3b:00.0 \
+  -e MIR_HELLO_TX_COUNT=1000 \
   mir/dataplane:dev
 
 # 사이드카 — 같은 볼륨에 붙인다
@@ -302,7 +352,9 @@ grpcurl -plaintext localhost:9100 mir.v1.DataPlane/Hello
 ```
 
 `MIR_DEVICE_SPEC` 는 device plugin 이 주입하는 `PCIDEVICE_*` 를 대신하는
-수동 지정 통로다.
+수동 지정 통로다. `MIR_HELLO_TX_COUNT` 는 기동 직후 hello packet 을 한 번
+내보낸다 — 표는 5절 3-1단계 참조. **선로에 실제로 프레임이 나가므로**
+대상 링크가 본인 소유/테스트 승인된 것인지 확인하고 켤 것.
 
 ---
 
@@ -317,6 +369,9 @@ grpcurl -plaintext localhost:9100 mir.v1.DataPlane/Hello
 | 리소스 변경 후 새 파드가 `Pending` 에서 멈춤 | `maxSurge` 가 0 이 아님 | PF 가 배타 자원이라 먼저 죽여야 반납된다. `strategy.rollingUpdate.maxSurge: 0` 확인 |
 | lcore 개수가 예상과 다름 | cpuset 이 반영되지 않음 | 파드가 Guaranteed QoS 인지, `cpu` 가 **정수**인지 확인. `cpu_manager_state` 도 점검 |
 | kubelet 이 기동 실패 | `cpu-manager-policy` 를 나중에 변경 | `sudo rm /var/lib/kubelet/cpu_manager_state && sudo systemctl restart k3s` |
+| `port N 구성 실패: dev_start ...` | 큐/디스크립터 설정을 PMD 가 거부 | 로그의 사유 문자열이 그대로 원인이다. 대개 hugepage 부족(mempool 생성 실패)이거나 PMD 가 요구하는 최소 디스크립터 수 미달 |
+| hello 가 `... 폐기` 로 끝남 | 링크 down 또는 TX 디스크립터 회수 정지 | `mir_port_wait_link` 로그를 먼저 볼 것. 링크가 up 인데도 폐기되면 상대 장비의 flow control(PAUSE) 을 의심 |
+| hello 는 "전송 완료" 인데 상대가 못 받음 | 큐 적재까지만 성공 | 텔레메트리의 `tx_pkts`(NIC 하드웨어 카운터)를 확인. 0 이면 선로에 안 나간 것. 스위치 경유면 0x88B5 프레임을 거르는 정책이 있는지도 확인 |
 | 포트는 probe 되는데 링크 다운 | SFP 모듈 비호환 | Intel 계열은 펌웨어가 비(非)Intel 광모듈을 거부할 수 있다. 케이블·모듈 교체로 확인 |
 | `dp.sock` 이 없다 | C 가 아직 EAL 초기화 중이거나 `ipc` 볼륨 마운트 누락 | 사이드카는 이 상태를 정상으로 보고 재시도한다. 수 초 뒤에도 없으면 dataplane 컨테이너 로그 확인 |
 | 사이드카가 `NOT_SERVING` 에서 안 벗어남 | C 데이터플레인이 뜨지 못함 | `kubectl logs -c dataplane` 확인. readiness 가 의도적으로 이 상태를 반영한다 |
@@ -337,6 +392,7 @@ BIOS 에 VT-d 가 없으면 no-IOMMU 폴백을 쓴다. **대가를 인지할 것
 ## 관련 문서
 
 - [REQUIREMENTS.md](REQUIREMENTS.md) — 요구사항·설계의 단일 출처
+- [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md) — k8s 없이 장비에 직접 설치(S 형태)
 - [deploy/k8s/overlays/README.md](../deploy/k8s/overlays/README.md) — 환경별 오버레이,
   클라우드 이식 시 무엇을 바꿔야 하는지
 - [deploy/host/10-kernel-cmdline.md](../deploy/host/10-kernel-cmdline.md) — 커널 파라미터 상세
