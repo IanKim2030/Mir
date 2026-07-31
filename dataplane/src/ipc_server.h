@@ -35,6 +35,10 @@ typedef struct {
     char     mac[MIR_PORT_MAC_MAX];
     int32_t  numa_node;
     char     device_spec[DEVICE_SPEC_VALUE_MAX];
+
+    /* rte_eth_dev_start 성공 여부. start 되지 않은 포트에 rte_eth_stats_get 을
+     * 부르면 안 되므로 텔레메트리가 이 값을 보고 건너뛴다. */
+    uint8_t  started;
 } mir_port_info;
 
 /*

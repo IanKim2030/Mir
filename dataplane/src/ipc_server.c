@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <rte_ethdev.h>
 #include <rte_log.h>
 
 #include "dataplane.pb-c.h"   /* meson custom_target 이 protoc-c 로 생성 */
@@ -233,11 +234,29 @@ static int send_telemetry(int fd)
 
     size_t n = g_cfg.n_ports > MIR_MAX_PORTS ? MIR_MAX_PORTS : g_cfg.n_ports;
     for (size_t i = 0; i < n; i++) {
-        /* 포트별 분해는 TX/RX 루프가 들어오는 Phase 2 에서 채운다.
-         * 지금은 아직 트래픽이 없어 전부 0 이고, 스냅샷 구조만 확정해 둔다. */
         mir__v1__port_stats__init(&ps[i]);
         ps[i].port_id = g_cfg.ports[i].port_id;
         ps_ptr[i]     = &ps[i];
+
+        /* 포트별 수치는 **NIC 하드웨어 카운터**에서 읽는다. per-lcore 카운터
+         * (mir_stats)는 포트로 분해되지 않을뿐더러, 우리가 큐에 넣은 수와 NIC
+         * 이 실제로 내보낸 수가 어긋나는 것 자체가 Phase 1 에서 봐야 할
+         * 정보다. rte_eth_stats_get 은 제어 경로 API 라 이 스레드에서 불러도
+         * worker 의 burst 루프를 방해하지 않는다. */
+        if (!g_cfg.ports[i].started)
+            continue;
+
+        struct rte_eth_stats es;
+        if (rte_eth_stats_get((uint16_t)g_cfg.ports[i].port_id, &es) != 0)
+            continue;
+
+        ps[i].tx_pkts  = es.opackets;
+        ps[i].tx_bytes = es.obytes;
+        ps[i].tx_err   = es.oerrors;
+        ps[i].rx_pkts  = es.ipackets;
+        ps[i].rx_bytes = es.ibytes;
+        ps[i].rx_drop  = es.imissed + es.rx_nombuf;
+        ps[i].rx_err   = es.ierrors;
     }
 
     snap.ts_ns         = now_ns();

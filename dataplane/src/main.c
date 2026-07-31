@@ -1,15 +1,23 @@
 /*
  * mir-dataplane — C/DPDK 데이터플레인.
  *
- * 이번 단계(Phase 0)의 완료 기준은 **컨테이너 안에서 rte_eal_init() 이 성공하고
- * NIC 포트가 인식되는 것**까지다. TX/RX 루프와 패킷 빌더는 Phase 1 이후다.
+ * Phase 0 의 완료 기준은 rte_eal_init() 성공 + 포트 인식이었고, Phase 1 은
+ * 거기에 **포트 start 와 hello packet 송신**을 얹는다. 즉 지금 증명하려는
+ * 것은 "mbuf 를 조립해 tx_burst 로 내보내면 실제로 선로에 나간다"까지다.
+ * 속도 제어·다중 lcore·L3/L4 헤더 빌더는 Phase 2 다.
  *
  * 기동 순서:
  *   1. cpuset·device plugin 환경변수에서 EAL 인자를 조립      (eal_args.c)
  *   2. rte_eal_init
  *   3. 포트 probe 결과 출력
- *   4. 제어 스레드 기동 — 사이드카와 unix socket 으로 연결     (ipc_server.c)
- *   5. SIGTERM/SIGINT 까지 대기 후 정리
+ *   4. 포트 구성·start·링크 확인                             (port.c)
+ *   5. MIR_HELLO_TX_COUNT 가 설정돼 있으면 hello packet 송신  (tx_hello.c)
+ *   6. 제어 스레드 기동 — 사이드카와 unix socket 으로 연결     (ipc_server.c)
+ *   7. SIGTERM/SIGINT 까지 대기 후 정리
+ *
+ * 포트 구성이나 hello 송신이 실패해도 프로세스는 죽지 않는다. 제어 채널이
+ * 살아 있어야 운영자가 hello response 로 상태를 확인할 수 있고, 기동 실패로
+ * 파드가 CrashLoopBackOff 에 빠지면 그 진단 경로마저 사라진다.
  */
 #define _GNU_SOURCE
 
@@ -17,6 +25,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,13 +41,18 @@
 
 #include "eal_args.h"
 #include "ipc_server.h"
+#include "port.h"
 #include "stats.h"
+#include "tx_hello.h"
 
 #ifndef MIR_VERSION
 #define MIR_VERSION "0.0.0-dev"
 #endif
 
 #define DEFAULT_SOCK_PATH "/var/run/mir/dp.sock"
+
+/* 링크 협상 대기. 100G 광 링크는 수 초까지 걸린다. */
+#define LINK_WAIT_MS 9000
 
 #define LOG(level, fmt, ...) \
     rte_log(RTE_LOG_ ## level, RTE_LOGTYPE_USER1, "main: " fmt "\n", ##__VA_ARGS__)
@@ -126,6 +140,63 @@ static size_t probe_ports(mir_port_info *out, size_t max, const eal_args *args)
     return n;
 }
 
+/*
+ * hello packet 송신 — 환경변수로 켰을 때만 동작한다.
+ *
+ * 제어 채널(StartScenario)이 아니라 환경변수로 거는 이유: 실물 반입 시점에는
+ * 제어부·사이드카가 아직 안 떠 있어도 NIC 만 놓고 TX 경로를 확인할 수 있어야
+ * 한다. 이 단계에서 의존 대상을 늘리면 "무엇이 고장났는지"를 좁히지 못한다.
+ */
+static void run_hello_tx(const mir_port_info *ports, mir_port *dev, size_t n_ports)
+{
+    mir_hello_conf hello;
+    char           herr[256] = {0};
+
+    int on = mir_hello_conf_from_env(&hello, herr, sizeof(herr));
+    if (on < 0) {
+        LOG(ERR, "hello 설정 오류: %s — 송신을 건너뛴다", herr);
+        return;
+    }
+    if (on == 0)
+        return;
+
+    /* port_id 는 PMD 가 부여한 값이라 0 부터 연속이라는 보장이 없다. */
+    size_t idx = SIZE_MAX;
+    for (size_t i = 0; i < n_ports; i++) {
+        if (ports[i].port_id == hello.port_id) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == SIZE_MAX) {
+        LOG(ERR, "MIR_HELLO_TX_PORT=%u 는 인식된 포트가 아니다", hello.port_id);
+        return;
+    }
+    if (!dev[idx].started) {
+        LOG(ERR, "port %u 는 start 되지 않았다 — hello 송신 불가", hello.port_id);
+        return;
+    }
+
+    LOG(INFO, "hello 송신: port=%u count=%u size=%uB burst=%u dst=%02x:%02x:%02x:%02x:%02x:%02x",
+        hello.port_id, hello.count, hello.pkt_size, hello.burst,
+        hello.dst.addr_bytes[0], hello.dst.addr_bytes[1], hello.dst.addr_bytes[2],
+        hello.dst.addr_bytes[3], hello.dst.addr_bytes[4], hello.dst.addr_bytes[5]);
+
+    uint32_t sent = 0, dropped = 0;
+    if (mir_tx_hello(&hello, dev[idx].pool, &sent, &dropped,
+                     herr, sizeof(herr)) != 0) {
+        LOG(ERR, "hello 송신 실패: %s", herr);
+        return;
+    }
+
+    LOG(INFO, "hello 송신 완료: %u/%u 전송, %u 폐기 (%llu bytes)",
+        sent, hello.count, dropped,
+        (unsigned long long)sent * hello.pkt_size);
+
+    if (dropped > 0 || sent < hello.count)
+        LOG(WARNING, "전량 전송되지 않았다 — 링크 상태와 상대 장비를 확인할 것");
+}
+
 int main(void)
 {
     eal_args args;
@@ -182,7 +253,23 @@ int main(void)
     else
         LOG(INFO, "포트 %zu개 인식", n_ports);
 
-    /* ── 4. 제어 스레드 기동 ──────────────────────────────────── */
+    /* ── 4. 포트 구성·start ───────────────────────────────────── */
+    static mir_port dev[MIR_MAX_PORTS];
+
+    for (size_t i = 0; i < n_ports; i++) {
+        char perr[256] = {0};
+        if (mir_port_setup(ports[i].port_id, &dev[i], perr, sizeof(perr)) != 0) {
+            LOG(ERR, "port %u 구성 실패: %s", ports[i].port_id, perr);
+            continue;
+        }
+        ports[i].started = 1;
+        mir_port_wait_link(ports[i].port_id, LINK_WAIT_MS, NULL);
+    }
+
+    /* ── 5. hello packet 송신 ─────────────────────────────────── */
+    run_hello_tx(ports, dev, n_ports);
+
+    /* ── 6. 제어 스레드 기동 ──────────────────────────────────── */
     const char *sock_path = getenv("MIR_IPC_SOCKET");
     if (!sock_path || !*sock_path)
         sock_path = DEFAULT_SOCK_PATH;
@@ -204,12 +291,14 @@ int main(void)
 
     if (ipc_server_start(&cfg) != 0) {
         fprintf(stderr, "제어 스레드 기동 실패\n");
+        for (size_t i = 0; i < n_ports; i++)
+            mir_port_close(&dev[i]);
         rte_eal_cleanup();
         eal_args_free(&args);
         return 1;
     }
 
-    /* ── 5. 종료 대기 ─────────────────────────────────────────── */
+    /* ── 7. 종료 대기 ─────────────────────────────────────────── */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;
@@ -224,7 +313,12 @@ int main(void)
     }
 
     LOG(INFO, "종료 신호 수신 — 정리 중");
+
+    /* 순서가 중요하다. 제어 스레드를 먼저 세워야 그 스레드가 텔레메트리를
+     * 만들며 rte_eth_stats_get() 을 부르는 도중에 포트가 닫히는 일이 없다. */
     ipc_server_stop();
+    for (size_t i = 0; i < n_ports; i++)
+        mir_port_close(&dev[i]);
     rte_eal_cleanup();
     eal_args_free(&args);
     LOG(INFO, "정상 종료");
