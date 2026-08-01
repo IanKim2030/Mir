@@ -1,0 +1,27 @@
+# 세 이미지 모두 저장소 루트를 빌드 컨텍스트로 쓴다 (proto/ 를 공유하므로).
+# 컨텍스트 전송량을 줄이고, 로컬 빌드 산출물이 레이어에 섞여 캐시를 무효화하는
+# 것을 막는다.
+#
+# 주의: 이 파일은 반드시 **컨텍스트 루트**에 있어야 한다. Dockerfile 옆에 두면
+# BuildKit 이 <Dockerfile>.dockerignore 라는 이름일 때만 인식한다.
+.git
+.github
+.gitattributes
+
+# 문서와 매니페스트는 이미지에 필요 없다
+docs
+deploy/k8s
+deploy/host
+README.md
+CLAUDE.md
+
+# 로컬 빌드 산출물
+dataplane/build
+control/bin
+**/*.o
+**/*.a
+
+# 에디터·OS
+.vscode
+.idea
+**/.DS_Store

@@ -1,0 +1,60 @@
+# mir-control — 제어부.
+#
+# 빌드 컨텍스트는 **저장소 루트**다:
+#   docker build -f deploy/docker/Dockerfile.control -t mir/control:dev .
+#
+# 최종 형태는 React 빌드 산출물을 go:embed 로 품은 단일 바이너리다
+# (REQUIREMENTS 4절). GUI 는 Phase 6 이므로 지금은 REST 만 서빙한다.
+
+ARG GO_VERSION=1.26
+
+# ─────────────────────────────────────────────────────────────
+# Phase 6 에서 여기에 React 빌드 스테이지가 들어간다:
+#
+#   FROM node:22 AS web
+#   WORKDIR /web
+#   COPY web/package*.json ./
+#   RUN npm ci
+#   COPY web/ ./
+#   RUN npm run build          # → /web/dist
+#
+# 그리고 아래 builder 에서:
+#   COPY --from=web /web/dist ./internal/web/dist
+#
+# 지금 이 스테이지를 빈 껍데기로 만들어 두지 않는 이유는, 아무것도 하지 않는
+# 스테이지가 빌드 시간만 먹고 "GUI 가 들어 있다"는 오해를 만들기 때문이다.
+# ─────────────────────────────────────────────────────────────
+
+FROM golang:${GO_VERSION} AS builder
+
+WORKDIR /src
+
+COPY control/go.mod control/go.sum ./
+RUN go mod download
+
+COPY control/ ./
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w" \
+        -o /out/mir-control ./cmd/mir-control
+
+# ─────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/mir-control /mir-control
+
+# 제어부도 특권이 필요 없다. k8s API 접근은 ServiceAccount 토큰으로 하며,
+# 권한은 deploy/k8s/base/control-rbac.yaml 에서 최소로 묶어 둔다.
+USER nonroot:nonroot
+
+ENV MIR_HTTP_LISTEN=:8080 \
+    MIR_NAMESPACE=mir \
+    MIR_DATAPLANE_DEPLOYMENT=mir-dataplane \
+    MIR_DATAPLANE_SERVICE=mir-dataplane \
+    MIR_DATAPLANE_GRPC_PORT=9100 \
+    MIR_PF_RESOURCE=mir.io/dpdk_pf
+
+EXPOSE 8080
+
+ENTRYPOINT ["/mir-control"]

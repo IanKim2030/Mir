@@ -1,0 +1,61 @@
+# 베어메탈 환경의 리소스·보안 설정.
+#
+# ★ 두 컨테이너의 cpu 표기가 서로 다른 게 이 파일의 핵심이다.
+#
+#   k8s QoS 는 파드 단위라 두 컨테이너 모두 requests == limits 여야 Guaranteed 가
+#   된다. 그 위에서 CPU Manager static 은 **정수 cpu 를 요청한 컨테이너에만**
+#   배타 코어를 주고, 분수를 요청한 컨테이너는 공유 풀에 남긴다.
+#
+#   따라서 dataplane: "5" / agent: "500m" 조합이 정확히 원하는 배치를 만든다 —
+#   사이드카의 gRPC 스레드가 worker 코어에 올라갈 물리적 경로가 사라진다.
+#   agent 의 cpu 를 실수로 정수로 주면 이 격리가 조용히 깨진다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mir-dataplane
+spec:
+  template:
+    spec:
+      containers:
+        - name: dataplane
+          resources:
+            requests:
+              cpu: "5"                 # 1 main(+제어 스레드) + 4 worker
+              memory: 2Gi
+              hugepages-1Gi: 4Gi
+              mir.io/dpdk_pf: "1"
+            limits:
+              cpu: "5"
+              memory: 2Gi
+              hugepages-1Gi: 4Gi
+              mir.io/dpdk_pf: "1"
+
+          securityContext:
+            # IOMMU 가 켜져 있으면 vfio-pci 는 비특권으로 동작한다.
+            #
+            # BIOS 에서 VT-d 를 못 켜 no-IOMMU 폴백을 쓰는 경우에만
+            # privileged: true 로 바꾼다. 그 대가로 컨테이너가 임의 물리 메모리에
+            # DMA 할 수 있게 되어 파드 격리 경계가 사라진다는 점을 인지할 것.
+            # → deploy/host/10-kernel-cmdline.md 3절
+            privileged: false
+            capabilities:
+              add:
+                - IPC_LOCK   # hugepage mlock
+                - SYS_NICE   # 스레드 우선순위/affinity
+
+        - name: agent
+          resources:
+            requests:
+              cpu: 500m      # ★ 분수여야 배타 코어를 가져가지 않는다
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+      volumes:
+        - name: hugepage
+          emptyDir:
+            # 베어메탈은 커널 cmdline 으로 1G 페이지를 예약할 수 있다.
+            # 클라우드 오버레이에서는 HugePages-2Mi 로 바꿔야 한다 —
+            # 1G 는 부팅 시에만 예약 가능한데 managed 노드풀은 cmdline 접근이 막힌다.
+            medium: HugePages-1Gi

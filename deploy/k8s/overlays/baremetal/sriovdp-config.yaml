@@ -1,0 +1,46 @@
+# SR-IOV Network Device Plugin 설정 — NIC PF 를 k8s 확장 리소스로 노출한다.
+#
+# 아래 pciAddresses 는 **검증기 10.10.40.121 (Intel CAR5070) 실측값**이다
+# (2026-08-01 확인: X710 4×10G, 4포트 전부 링크 UP, i40e 드라이버).
+# 다른 장비에 배포할 때는 deploy/host/20-bind-vfio.sh 를 인자 없이 실행해
+# 후보 목록을 뽑아 교체할 것.
+#
+# ⚠️ 관리용 인터페이스를 넣지 말 것 — 이 장비의 eth0(I210, 0000:01:00.0)이
+#    기본 경로를 갖고 있어 vfio 로 넘기면 SSH 접속이 끊긴다.
+#
+# 우리는 VF 가 아니라 **PF 전체**를 파드에 넘긴다. 그래야 L2 임의조작과
+# src IP 스푸핑이 가능하다 — VF 는 PF 의 spoof check / MAC 필터에 막힌다.
+# (REQUIREMENTS 4-1 절 기능 능력 매트릭스)
+#
+# 플러그인은 sriovMode 가 아닐 때 root device 자체를 allocatable 리소스로
+# 내보낸다. 설정 스키마는 배포하는 플러그인 버전에 따라 다르므로,
+# 적용 후 반드시 확인할 것:
+#
+#   kubectl get node -o jsonpath='{.items[0].status.allocatable}' | tr ',' '\n' | grep dpdk_pf
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "resourceList": [
+        {
+          "resourceName": "dpdk_pf",
+          "resourcePrefix": "mir.io",
+          "deviceType": "vfio",
+          "selectors": {
+            "vendors": ["8086"],
+            "drivers": ["vfio-pci"],
+            "pciAddresses": [
+              "0000:43:00.0",
+              "0000:43:00.1",
+              "0000:43:00.2",
+              "0000:43:00.3"
+            ]
+          }
+        }
+      ]
+    }
