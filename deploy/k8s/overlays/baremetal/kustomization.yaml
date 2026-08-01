@@ -20,6 +20,10 @@ patches:
       kind: Deployment
       name: mir-dataplane
 
+# ★ 이 값이 N 이다 — 아키텍처상 고정값이 아니라 **장비별 변수**다.
+#   PF 하나당 파드 하나이므로, NIC 을 늘리면 여기만 올리면 되고 코드는 그대로다.
+#   대신 코어·hugepage·PCIe 슬롯이 함께 N 배로 커진다 (REQUIREMENTS 3절 성능).
+#
 # NIC PF 개수와 같아야 한다. 넘으면 초과분이 Pending 에 쌓인다
 # (제어부 API 로 조정하면 상한 검증이 걸려 400 으로 거절된다).
 #
