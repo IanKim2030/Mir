@@ -16,11 +16,16 @@
 
 `/etc/default/grub` 의 `GRUB_CMDLINE_LINUX_DEFAULT` 에 추가한다.
 
+### 검증기 `10.10.40.121` (Xeon Gold 5418N, 24C/1소켓) — 실측 확정값
+
 ```
 intel_iommu=on iommu=pt
 default_hugepagesz=1G hugepagesz=1G hugepages=16
-isolcpus=managed_irq,domain,2-31 nohz_full=2-31 rcu_nocbs=2-31
+isolcpus=managed_irq,domain,2-23 nohz_full=2-23 rcu_nocbs=2-23
 ```
+
+> **BIOS 에서 HT 를 먼저 끌 것.** 아래 "현재 설정이 왜 무효인가" 참조.
+> HT 를 끄면 논리 CPU 가 0-23(=물리코어 24개)이 되어 위 값이 그대로 맞는다.
 
 ```bash
 sudo vi /etc/default/grub
@@ -46,14 +51,43 @@ sudo reboot
 그 여집합이 다음 단계의 kubelet `reserved-cpus` 가 된다.
 
 ```
-전체 코어 0-31
+검증기 전체 코어 0-23 (HT off 기준)
   ├─ 0,1        → OS / kubelet / 시스템 데몬 / 사이드카   → reserved-cpus=0,1
-  └─ 2-31       → isolcpus, DPDK worker 전용             → CPU Manager가 파드에 배타 할당
+  └─ 2-23       → isolcpus, DPDK worker 전용 (22코어)    → CPU Manager가 파드에 배타 할당
 ```
 
-> 코어 수는 서버 실물 확인 후 확정한다 (REQUIREMENTS Open Issue 2).
+데이터플레인 파드는 PF 하나당 하나이므로 **4개**(X710 4포트), 파드당 `cpu: "5"`
+(main 1 + worker 4) → 20코어. `isolcpus` 22코어 안에 들어간다.
+
 > NUMA 2소켓이면 **NIC이 붙은 소켓의 코어만** 데이터플레인에 할당되도록
 > Topology Manager `single-numa-node` 정책이 처리한다 — `30-install-k3s.sh` 참조.
+> 검증기는 1소켓이라 해당 없음. 목표기(2소켓)에서는 필수다.
+
+### ⚠️ 검증기의 현재 설정이 왜 무효인가
+
+점검 시점(2026-08-01) 실측:
+
+```
+현재 cmdline: isolcpus=0-23 nohz_full=0-23 rcu_nocbs=0-23
+HT 매핑:      core0→(0,24)  core1→(1,25)  …  core23→(23,47)
+```
+
+`0-23` 은 물리코어 24개 **전부의 첫 번째 스레드**다. OS 가 쓰는 `24-47` 은 바로 그
+물리코어들의 **HT 형제**이므로, 24개 물리코어를 DPDK 와 OS 가 통째로 공유한다.
+형제 스레드는 실행 유닛과 L1/L2 를 공유하니 busy-poll 중인 코어 옆에서 OS 작업이
+돌면 pps 지터가 그대로 발생한다 — **격리가 전혀 성립하지 않는다.**
+
+확인 방법:
+
+```bash
+lscpu -p=CPU,CORE | grep -v '^#' | sort -t, -k2 -n | head -4
+#   0,0 / 24,0 / 1,1 / 25,1  ← 같은 CORE 에 두 CPU 가 묶여 있으면 HT on
+```
+
+해결은 BIOS 에서 **Hyper-Threading Disable** (0절 표의 권장 사항과 동일). 끄면
+논리 CPU 가 24개로 줄어 `2-23` 이 물리코어 22개와 1:1 대응한다. HT 를 유지해야 한다면
+`isolcpus=2-23,26-47` 처럼 **물리코어 단위로 형제를 함께** 격리해야 하지만,
+DPDK worker 를 형제 스레드에 올려도 성능은 늘지 않으므로 권장하지 않는다.
 
 ### 선택: 지연 최적화 (Phase 7에서 재검토)
 

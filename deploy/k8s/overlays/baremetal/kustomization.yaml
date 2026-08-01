@@ -22,9 +22,16 @@ patches:
 
 # NIC PF 개수와 같아야 한다. 넘으면 초과분이 Pending 에 쌓인다
 # (제어부 API 로 조정하면 상한 검증이 걸려 400 으로 거절된다).
+#
+# 검증기 10.10.40.121 = X710 4포트 → 4.
+#   코어      4 파드 × cpu "5" = 20   ≤ isolcpus 2-23 (22코어)
+#   hugepage  4 파드 × 4Gi     = 16Gi = hugepages=16
+# 두 값 모두 딱 맞으므로 replicas 를 올리려면 10-kernel-cmdline.md 부터 고쳐야 한다.
+#
+# ⚠️ 실물 첫 기동(Phase 0 검증)에서는 1 로 낮춰 단일 파드부터 확인할 것.
 replicas:
   - name: mir-dataplane
-    count: 1
+    count: 4
 
 images:
   - name: mir/dataplane
