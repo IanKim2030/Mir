@@ -170,6 +170,7 @@ Mir/
 │  └─ dataplane.proto   ← 두 hop 공용 스키마 + gRPC service
 ├─ docs/
 │  ├─ REQUIREMENTS.md   ← 상세 요구사항·설계·Open Issues (원본 SoT)
+│  ├─ ARCHITECTURE.md   ← 구현 관점: 채널·콜플로우·스레드 모델·로드맵 매핑
 │  └─ DEPLOYMENT.md     ← 호스트 준비 ~ 배포 ~ 검증 ~ 트러블슈팅
 ├─ dataplane/           ← C/DPDK. 순수 C, meson 빌드
 │  └─ src/  eal_args · stats · ipc_server · port · tx_hello · pcap_reader · main
@@ -185,6 +186,9 @@ Mir/
 
 - **상세 요구사항·설계·미확정 이슈**의 단일 출처(Source of Truth)는
   [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md). 세부 결정은 그 문서를 갱신한다.
+- **코드를 건드리기 전에** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 를 읽을 것.
+  채널 ①~⑤ 의 콜플로우(시퀀스 다이어그램), 스레드·코어 격리가 깨지는 지점,
+  그리고 **각 Phase 가 어느 파일을 건드리는지**가 정리돼 있다.
 
 ## 현재 상태
 
