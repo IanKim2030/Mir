@@ -331,6 +331,12 @@ static int send_telemetry(int fd)
         hs.rtt_max_us = ss.rtt_max_us;
         hs.rtt_avg_us = ss.rtt_count
                             ? (uint32_t)(ss.rtt_sum_us / ss.rtt_count) : 0;
+        hs.established = ss.established;
+        hs.req_sent    = ss.req_sent;
+        hs.responded   = ss.responded;
+        hs.closed      = ss.closed;
+        hs.bytes_rx    = ss.bytes_rx;
+        hs.http_2xx    = ss.http_2xx;
         snap.handshake = &hs;
     }
 

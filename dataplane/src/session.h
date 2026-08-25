@@ -38,6 +38,14 @@ typedef struct {
     uint32_t rtt_min_us;
     uint32_t rtt_max_us;
     uint32_t rtt_count;
+
+    /* 데이터 경로 (Phase 5a) — l7_request 가 있을 때만 진행. */
+    uint32_t established;   /* 3-way 완료(ACK 보냄) */
+    uint32_t req_sent;      /* L7 요청 송신 */
+    uint32_t responded;     /* 응답 첫 세그먼트 수신 */
+    uint32_t closed;        /* FIN 교환으로 정상 종료 */
+    uint64_t bytes_rx;      /* 받은 응답 바이트 누계 */
+    uint32_t http_2xx;      /* 상태줄이 HTTP 2xx 인 수 */
 } mir_session_stats;
 
 /*

@@ -260,6 +260,11 @@ message HandshakeSpec {
 
   // SYN 을 보내고 이 시간 안에 SYN-ACK 가 없으면 timeout 으로 판정한다. 0 = 1000ms.
   uint32 synack_timeout_ms = 8;
+
+  // 3-way 가 완료(ACK)된 뒤 선로에 실어 보낼 L7 요청 바이트 (Phase 5a).
+  // 비우면 Phase 4 동작(핸드셰이크만) 그대로다. on_synack=COMPLETE 일 때만 쓴다.
+  // 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n". TLS 는 5b.
+  bytes l7_request = 9;
 }
 
 message StopScenarioRequest {
@@ -337,6 +342,14 @@ message HandshakeStats {
   uint32 rtt_min_us = 7;
   uint32 rtt_avg_us = 8;
   uint32 rtt_max_us = 9;
+
+  // 데이터 경로 (Phase 5a). l7_request 가 있을 때만 진행한다.
+  uint32 established = 10;  // 3-way 완료(ACK 보냄)
+  uint32 req_sent    = 11;  // L7 요청을 실제로 보낸 수
+  uint32 responded   = 12;  // 응답 첫 세그먼트를 받은 수
+  uint32 closed      = 13;  // FIN 교환으로 정상 종료한 수
+  uint64 bytes_rx    = 14;  // 받은 응답 바이트 누계
+  uint32 http_2xx    = 15;  // 응답 상태줄이 HTTP 2xx 인 수 (평문 HTTP)
 }
 
 // TCP 플래그별 수신 분류. handshake 검증의 1차 지표다.

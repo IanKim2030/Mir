@@ -341,7 +341,8 @@ Tier 3  --vdev net_af_packet0,iface=eth2   ← 준비물 없음. --no-huge 가�
 | **3** 수신 캡처 + 판정 | ⬜ | RX 루프 · 실시간 판정 → `Event` 생성 | **② 실사용 시작** |
 | **4** handshake 제어 | ⬜ | 세션 상태 기계 (ACK 생략 등) | ② |
 | **4-1** PCAP 리플레이 | ⬜ | `pcap_reader.h` 구현 · `StartScenario` 실동작 | **⑤ 실사용 시작** |
-| **5** TLS + HTTP stateful | ⬜ | 세션 엔진 (모드 B) | ② |
+| **5a** TCP 데이터경로 + 평문 HTTP | ✅ | `session.c` (모드 B 확장) | ② |
+| **5b** TLS + HTTPS (mbedTLS) | ⬜ | 세션 엔진 + mbedTLS | ② |
 | **6** GUI | ⬜ | `internal/api` 확장 + React | REST/WS |
 | **7** 400G 튜닝 | ⬜ | lcore 스케일링 · 배치 · NUMA/캐시. **목표기 도입 전제** | — |
 | **8** 클라우드 이식 | ⬜ | `device_spec` 의 `MAC_ADDR` 경로 · PMD 추가 | — |

@@ -169,6 +169,14 @@ type handshakeStats struct {
 	RttMinUs  uint32 `json:"rttMinUs"`
 	RttAvgUs  uint32 `json:"rttAvgUs"`
 	RttMaxUs  uint32 `json:"rttMaxUs"`
+
+	// 데이터 경로 (Phase 5a). l7Request 를 줬을 때만 진행.
+	Established uint32 `json:"established"`
+	ReqSent     uint32 `json:"reqSent"`
+	Responded   uint32 `json:"responded"`
+	Closed      uint32 `json:"closed"`
+	BytesRx     uint64 `json:"bytesRx"`
+	Http2xx     uint32 `json:"http2xx"`
 }
 
 type rxClass struct {
@@ -283,6 +291,8 @@ func (s *Server) instanceViews() []instanceView {
 					Sessions: hs.Sessions, Sent: hs.Sent, SynAck: hs.Synack,
 					Completed: hs.Completed, Refused: hs.Refused, TimedOut: hs.TimedOut,
 					RttMinUs: hs.RttMinUs, RttAvgUs: hs.RttAvgUs, RttMaxUs: hs.RttMaxUs,
+					Established: hs.Established, ReqSent: hs.ReqSent, Responded: hs.Responded,
+					Closed: hs.Closed, BytesRx: hs.BytesRx, Http2xx: hs.Http_2Xx,
 				}
 			}
 		}

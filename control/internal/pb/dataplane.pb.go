@@ -1250,8 +1250,12 @@ type HandshakeSpec struct {
 	OnSynack    HandshakeSpec_Action `protobuf:"varint,7,opt,name=on_synack,json=onSynack,proto3,enum=mir.v1.HandshakeSpec_Action" json:"on_synack,omitempty"`
 	// SYN 을 보내고 이 시간 안에 SYN-ACK 가 없으면 timeout 으로 판정한다. 0 = 1000ms.
 	SynackTimeoutMs uint32 `protobuf:"varint,8,opt,name=synack_timeout_ms,json=synackTimeoutMs,proto3" json:"synack_timeout_ms,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// 3-way 가 완료(ACK)된 뒤 선로에 실어 보낼 L7 요청 바이트 (Phase 5a).
+	// 비우면 Phase 4 동작(핸드셰이크만) 그대로다. on_synack=COMPLETE 일 때만 쓴다.
+	// 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n". TLS 는 5b.
+	L7Request     []byte `protobuf:"bytes,9,opt,name=l7_request,json=l7Request,proto3" json:"l7_request,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HandshakeSpec) Reset() {
@@ -1338,6 +1342,13 @@ func (x *HandshakeSpec) GetSynackTimeoutMs() uint32 {
 		return x.SynackTimeoutMs
 	}
 	return 0
+}
+
+func (x *HandshakeSpec) GetL7Request() []byte {
+	if x != nil {
+		return x.L7Request
+	}
+	return nil
 }
 
 type StopScenarioRequest struct {
@@ -1684,16 +1695,23 @@ func (x *TelemetrySnapshot) GetHandshake() *HandshakeStats {
 
 // handshake 세션의 진행 집계. RTT 는 µs 단위.
 type HandshakeStats struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sessions      uint32                 `protobuf:"varint,1,opt,name=sessions,proto3" json:"sessions,omitempty"`                 // 총 세션 수
-	Sent          uint32                 `protobuf:"varint,2,opt,name=sent,proto3" json:"sent,omitempty"`                         // SYN 을 보낸 수
-	Synack        uint32                 `protobuf:"varint,3,opt,name=synack,proto3" json:"synack,omitempty"`                     // SYN-ACK 를 받은 수
-	Completed     uint32                 `protobuf:"varint,4,opt,name=completed,proto3" json:"completed,omitempty"`               // 지정 행동까지 끝낸 수
-	Refused       uint32                 `protobuf:"varint,5,opt,name=refused,proto3" json:"refused,omitempty"`                   // SYN 에 RST 로 거부된 수
-	TimedOut      uint32                 `protobuf:"varint,6,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"` // SYN-ACK 무응답
-	RttMinUs      uint32                 `protobuf:"varint,7,opt,name=rtt_min_us,json=rttMinUs,proto3" json:"rtt_min_us,omitempty"`
-	RttAvgUs      uint32                 `protobuf:"varint,8,opt,name=rtt_avg_us,json=rttAvgUs,proto3" json:"rtt_avg_us,omitempty"`
-	RttMaxUs      uint32                 `protobuf:"varint,9,opt,name=rtt_max_us,json=rttMaxUs,proto3" json:"rtt_max_us,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Sessions  uint32                 `protobuf:"varint,1,opt,name=sessions,proto3" json:"sessions,omitempty"`                 // 총 세션 수
+	Sent      uint32                 `protobuf:"varint,2,opt,name=sent,proto3" json:"sent,omitempty"`                         // SYN 을 보낸 수
+	Synack    uint32                 `protobuf:"varint,3,opt,name=synack,proto3" json:"synack,omitempty"`                     // SYN-ACK 를 받은 수
+	Completed uint32                 `protobuf:"varint,4,opt,name=completed,proto3" json:"completed,omitempty"`               // 지정 행동까지 끝낸 수
+	Refused   uint32                 `protobuf:"varint,5,opt,name=refused,proto3" json:"refused,omitempty"`                   // SYN 에 RST 로 거부된 수
+	TimedOut  uint32                 `protobuf:"varint,6,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"` // SYN-ACK 무응답
+	RttMinUs  uint32                 `protobuf:"varint,7,opt,name=rtt_min_us,json=rttMinUs,proto3" json:"rtt_min_us,omitempty"`
+	RttAvgUs  uint32                 `protobuf:"varint,8,opt,name=rtt_avg_us,json=rttAvgUs,proto3" json:"rtt_avg_us,omitempty"`
+	RttMaxUs  uint32                 `protobuf:"varint,9,opt,name=rtt_max_us,json=rttMaxUs,proto3" json:"rtt_max_us,omitempty"`
+	// 데이터 경로 (Phase 5a). l7_request 가 있을 때만 진행한다.
+	Established   uint32 `protobuf:"varint,10,opt,name=established,proto3" json:"established,omitempty"`        // 3-way 완료(ACK 보냄)
+	ReqSent       uint32 `protobuf:"varint,11,opt,name=req_sent,json=reqSent,proto3" json:"req_sent,omitempty"` // L7 요청을 실제로 보낸 수
+	Responded     uint32 `protobuf:"varint,12,opt,name=responded,proto3" json:"responded,omitempty"`            // 응답 첫 세그먼트를 받은 수
+	Closed        uint32 `protobuf:"varint,13,opt,name=closed,proto3" json:"closed,omitempty"`                  // FIN 교환으로 정상 종료한 수
+	BytesRx       uint64 `protobuf:"varint,14,opt,name=bytes_rx,json=bytesRx,proto3" json:"bytes_rx,omitempty"` // 받은 응답 바이트 누계
+	Http_2Xx      uint32 `protobuf:"varint,15,opt,name=http_2xx,json=http2xx,proto3" json:"http_2xx,omitempty"` // 응답 상태줄이 HTTP 2xx 인 수 (평문 HTTP)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1787,6 +1805,48 @@ func (x *HandshakeStats) GetRttAvgUs() uint32 {
 func (x *HandshakeStats) GetRttMaxUs() uint32 {
 	if x != nil {
 		return x.RttMaxUs
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetEstablished() uint32 {
+	if x != nil {
+		return x.Established
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetReqSent() uint32 {
+	if x != nil {
+		return x.ReqSent
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetResponded() uint32 {
+	if x != nil {
+		return x.Responded
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetClosed() uint32 {
+	if x != nil {
+		return x.Closed
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetBytesRx() uint64 {
+	if x != nil {
+		return x.BytesRx
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetHttp_2Xx() uint32 {
+	if x != nil {
+		return x.Http_2Xx
 	}
 	return 0
 }
@@ -2139,7 +2199,7 @@ const file_dataplane_proto_rawDesc = "" +
 	"\x05speed\x18\x02 \x01(\x01R\x05speed\x12\x12\n" +
 	"\x04loop\x18\x03 \x01(\rR\x04loop\x12\x1b\n" +
 	"\tfirst_pkt\x18\x04 \x01(\rR\bfirstPkt\x12\x19\n" +
-	"\blast_pkt\x18\x05 \x01(\rR\alastPkt\"\xff\x02\n" +
+	"\blast_pkt\x18\x05 \x01(\rR\alastPkt\"\x9e\x03\n" +
 	"\rHandshakeSpec\x12!\n" +
 	"\x03eth\x18\x01 \x01(\v2\x0f.mir.v1.EthSpecR\x03eth\x12\x15\n" +
 	"\x06src_ip\x18\x02 \x01(\tR\x05srcIp\x12\x15\n" +
@@ -2148,7 +2208,9 @@ const file_dataplane_proto_rawDesc = "" +
 	"\bsessions\x18\x05 \x01(\rR\bsessions\x12\"\n" +
 	"\rsrc_port_base\x18\x06 \x01(\rR\vsrcPortBase\x129\n" +
 	"\ton_synack\x18\a \x01(\x0e2\x1c.mir.v1.HandshakeSpec.ActionR\bonSynack\x12*\n" +
-	"\x11synack_timeout_ms\x18\b \x01(\rR\x0fsynackTimeoutMs\"[\n" +
+	"\x11synack_timeout_ms\x18\b \x01(\rR\x0fsynackTimeoutMs\x12\x1d\n" +
+	"\n" +
+	"l7_request\x18\t \x01(\fR\tl7Request\"[\n" +
 	"\x06Action\x12\x16\n" +
 	"\x12ACTION_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fACTION_COMPLETE\x10\x01\x12\x14\n" +
@@ -2183,7 +2245,7 @@ const file_dataplane_proto_rawDesc = "" +
 	"\atx_drop\x18\b \x01(\x04R\x06txDrop\x12\x1f\n" +
 	"\x02rx\x18\t \x01(\v2\x0f.mir.v1.RxClassR\x02rx\x124\n" +
 	"\thandshake\x18\n" +
-	" \x01(\v2\x16.mir.v1.HandshakeStatsR\thandshake\"\x87\x02\n" +
+	" \x01(\v2\x16.mir.v1.HandshakeStatsR\thandshake\"\xb0\x03\n" +
 	"\x0eHandshakeStats\x12\x1a\n" +
 	"\bsessions\x18\x01 \x01(\rR\bsessions\x12\x12\n" +
 	"\x04sent\x18\x02 \x01(\rR\x04sent\x12\x16\n" +
@@ -2196,7 +2258,14 @@ const file_dataplane_proto_rawDesc = "" +
 	"\n" +
 	"rtt_avg_us\x18\b \x01(\rR\brttAvgUs\x12\x1c\n" +
 	"\n" +
-	"rtt_max_us\x18\t \x01(\rR\brttMaxUs\"\xd3\x01\n" +
+	"rtt_max_us\x18\t \x01(\rR\brttMaxUs\x12 \n" +
+	"\vestablished\x18\n" +
+	" \x01(\rR\vestablished\x12\x19\n" +
+	"\breq_sent\x18\v \x01(\rR\areqSent\x12\x1c\n" +
+	"\tresponded\x18\f \x01(\rR\tresponded\x12\x16\n" +
+	"\x06closed\x18\r \x01(\rR\x06closed\x12\x19\n" +
+	"\bbytes_rx\x18\x0e \x01(\x04R\abytesRx\x12\x19\n" +
+	"\bhttp_2xx\x18\x0f \x01(\rR\ahttp2xx\"\xd3\x01\n" +
 	"\aRxClass\x12\x17\n" +
 	"\atcp_syn\x18\x01 \x01(\x04R\x06tcpSyn\x12\x1e\n" +
 	"\vtcp_syn_ack\x18\x02 \x01(\x04R\ttcpSynAck\x12\x17\n" +
