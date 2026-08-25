@@ -170,6 +170,33 @@ void mir_port_close(mir_port *p)
     }
 }
 
+/*
+ * 링크 상태를 사람이 읽을 문자열로 만든다.
+ *
+ * DPDK 의 rte_eth_link_to_str() 을 쓰지 않는 이유: 아직 실험적 API 라
+ * ABI 가 고정되지 않았다(-Wdeprecated-declarations 경고가 나온다).
+ * 로그 한 줄을 위해 버전 간에 깨질 수 있는 심볼에 묶일 이유가 없다.
+ */
+static void format_link(char *buf, size_t buflen, const struct rte_eth_link *link)
+{
+    if (link->link_status != RTE_ETH_LINK_UP) {
+        snprintf(buf, buflen, "Link down");
+        return;
+    }
+
+    char speed[32];
+    if (link->link_speed == RTE_ETH_SPEED_NUM_UNKNOWN)
+        snprintf(speed, sizeof(speed), "Unknown speed");
+    else if (link->link_speed % 1000 == 0)
+        snprintf(speed, sizeof(speed), "%u Gbps", link->link_speed / 1000);
+    else
+        snprintf(speed, sizeof(speed), "%u Mbps", link->link_speed);
+
+    snprintf(buf, buflen, "Link up at %s %s %s", speed,
+             link->link_duplex == RTE_ETH_LINK_FULL_DUPLEX ? "FDX" : "HDX",
+             link->link_autoneg == RTE_ETH_LINK_AUTONEG ? "Autoneg" : "Fixed");
+}
+
 int mir_port_wait_link(uint16_t port_id, unsigned timeout_ms,
                        struct rte_eth_link *out)
 {
@@ -200,9 +227,9 @@ int mir_port_wait_link(uint16_t port_id, unsigned timeout_ms,
     if (out)
         *out = link;
 
-    char desc[RTE_ETH_LINK_MAX_STR_LEN];
-    if (rte_eth_link_to_str(desc, sizeof(desc), &link) > 0)
-        LOG(INFO, "port %u: %s", port_id, desc);
+    char desc[128];
+    format_link(desc, sizeof(desc), &link);
+    LOG(INFO, "port %u: %s", port_id, desc);
 
     return link.link_status == RTE_ETH_LINK_UP ? 1 : 0;
 }

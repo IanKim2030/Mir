@@ -92,21 +92,40 @@ done
 # ─────────────────────────────────────────────────────────────
 sec "4. Docker"
 
+# 이 스크립트는 root 없이 도는 것이 전제다. 그런데 docker 데몬 소켓은 root
+# 또는 docker 그룹 멤버만 열 수 있어서, "데몬이 죽었다"와 "내가 접근 권한이
+# 없다"가 같은 실패로 보인다. 둘을 구분하지 않으면 멀쩡한 장비를 두고
+# systemctl 을 뒤지게 된다.
+DOCKER=""
+if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+        DOCKER="docker"
+    elif sudo -n docker info >/dev/null 2>&1; then
+        DOCKER="sudo -n docker"
+    fi
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
     bad "docker 없음" "30-install-docker.sh 실행 필요"
-elif ! docker info >/dev/null 2>&1; then
+elif [[ -z "$DOCKER" ]]; then
     bad "docker 데몬 응답 없음" "systemctl status docker"
 else
     ok "docker" "$(docker --version | sed 's/^Docker version //')"
 
-    if docker compose version >/dev/null 2>&1; then
-        ok "compose 플러그인" "$(docker compose version --short 2>/dev/null)"
+    if [[ "$DOCKER" == sudo* ]]; then
+        # compose 명령마다 sudo 를 붙여야 한다는 뜻이라 그냥 넘길 정보가 아니다.
+        meh "현재 사용자가 docker 그룹에 없음" \
+            "compose 를 sudo 로 돌리거나 'sudo usermod -aG docker $USER' 후 재로그인"
+    fi
+
+    if $DOCKER compose version >/dev/null 2>&1; then
+        ok "compose 플러그인" "$($DOCKER compose version --short 2>/dev/null)"
     else
         bad "compose 플러그인 없음" "docker-compose-plugin 설치 필요"
     fi
 
     # cgroup v2 여야 cpuset 이 컨테이너에 제대로 걸린다.
-    cgv=$(docker info --format '{{.CgroupVersion}}' 2>/dev/null || echo "?")
+    cgv=$($DOCKER info --format '{{.CgroupVersion}}' 2>/dev/null || echo "?")
     [[ "$cgv" == "2" ]]         && ok  "cgroup v2"         || meh "cgroup v$cgv" "v2 권장 — cpuset 동작을 반드시 확인할 것"
 fi
 

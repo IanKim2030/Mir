@@ -16,7 +16,10 @@ protobuf_c = dependency('libprotobuf-c', version: '>=1.3')
 threads    = dependency('threads')
 
 # ── 빌드 플래그 ───────────────────────────────────────────────
-add_project_arguments('-D_GNU_SOURCE', language: 'c')
+#
+# _GNU_SOURCE 는 여기서 주지 않는다. 각 .c 가 첫 줄에 스스로 정의하고 있어
+# 중복 정의 경고가 매 빌드마다 나왔다. 파일이 자기 요구사항을 직접 선언하는
+# 쪽을 남긴다 — 빌드 시스템 없이 개별 파일만 컴파일해 검증할 수 있다.
 add_project_arguments('-DMIR_VERSION="' + meson.project_version() + '"', language: 'c')
 
 # -march=native 는 금지다. 빌드 머신과 실행 머신의 CPU 가 다르면 SIGILL 로
