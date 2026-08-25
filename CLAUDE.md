@@ -140,8 +140,8 @@ dp0↔f0 은 hello packet 으로 확인했다. 나머지는 같은 방법으로 
 
 `Phase 0` 환경/HW → `1` DPDK hello packet → `2` L2~L4 고속 송신 → `3` 수신 캡처+판정 →
 `4` handshake 제어 → `4-1` PCAP 리플레이 엔진 → `5a` TCP 데이터경로+평문 HTTP
-→ `5b` TLS+HTTPS(mbedTLS) → **`6a` GUI 라이브 대시보드** → `6b·6c` React Flow
-빌더·WS → `7` 400G 튜닝 → `8` 클라우드 백엔드 이식.
+→ `5b` TLS+HTTPS(mbedTLS) → `6a` GUI 라이브 대시보드 → **`6b` React Flow 빌더**
+→ `6c` WS 스트리밍·uPlot 심화 → `7` 400G 튜닝 → `8` 클라우드 백엔드 이식.
 
 `0`~`6` 은 검증기(40G)에서, `7` 은 목표기(400G)에서 수행한다.
 

@@ -118,3 +118,63 @@ body { margin: 0; background: var(--bg); color: var(--text); }
   .grid { grid-template-columns: 1fr; }
   .card.span2 { grid-column: auto; }
 }
+
+/* ── 탭 ── */
+.tabs { display: flex; gap: 4px; margin-left: 24px; }
+.tab {
+  background: transparent; border: 1px solid transparent; color: var(--dim);
+  padding: 6px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; font-weight: 600;
+}
+.tab:hover { color: var(--text); }
+.tab.on { background: var(--panel2); border-color: var(--border); color: var(--accent); }
+
+/* ── 빌더 ── */
+.builder { display: grid; grid-template-columns: 1fr 360px; gap: 12px; height: calc(100vh - 130px); }
+.canvas { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.canvas .react-flow { background: var(--bg); }
+.palette {
+  position: absolute; left: 10px; bottom: 10px; z-index: 5; display: flex; gap: 6px;
+  align-items: center; flex-wrap: wrap; background: rgba(21,26,35,0.9); padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--dim);
+}
+.palette button {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+}
+.palette button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 레이어 노드 */
+.lnode {
+  background: var(--panel2); border: 1.5px solid var(--border); border-radius: 10px;
+  width: 220px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+}
+.lnode-h { padding: 8px 12px; font-weight: 700; border-bottom: 1px solid var(--border); }
+.lnode-l {
+  font-size: 10px; background: var(--bg); color: var(--dim); padding: 1px 6px;
+  border-radius: 4px; margin-right: 6px; vertical-align: middle;
+}
+.lnode-b { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.lnode-f { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--dim); }
+.lnode-f input {
+  width: 110px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 5px; padding: 3px 6px; font-family: ui-monospace, monospace; font-size: 11px;
+}
+.react-flow__handle { background: var(--accent); border: none; width: 8px; height: 8px; }
+
+/* 인스펙터 */
+.inspector { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-y: auto; }
+.inspector h3 { margin: 0 0 10px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.inspector h3:not(:first-child) { margin-top: 20px; }
+.ifield { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: 12px; color: var(--dim); }
+.ifield input, .ifield select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.build-start { width: 100%; margin-top: 6px; padding: 10px; }
+.ins-msg { margin-top: 10px; font-size: 12px; color: var(--dim); }
+.ins-err { margin-top: 8px; font-size: 12px; color: var(--err); }
+.json {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  font-size: 11px; color: #b9c2d0; overflow-x: auto; max-height: 320px; overflow-y: auto;
+  font-family: ui-monospace, monospace;
+}

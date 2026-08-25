@@ -7,6 +7,7 @@ import {
   InstanceState,
 } from './api'
 import { TxChart } from './TxChart'
+import { Builder } from './Builder'
 
 const POLL_MS = 1000
 const HISTORY = 60 // 차트에 남길 표본 수 (초)
@@ -54,6 +55,7 @@ export default function App() {
   const [xs, setXs] = useState<number[]>([])
   const [txHist, setTxHist] = useState<number[]>([])
   const [rxHist, setRxHist] = useState<number[]>([])
+  const [tab, setTab] = useState<'dashboard' | 'builder'>('dashboard')
 
   const prevRef = useRef<Prev | null>(null)
 
@@ -127,6 +129,14 @@ export default function App() {
           <span className="logo">◆</span> Mir
           <span className="tagline">패킷 제너레이터</span>
         </div>
+        <nav className="tabs">
+          <button className={tab === 'dashboard' ? 'tab on' : 'tab'} onClick={() => setTab('dashboard')}>
+            대시보드
+          </button>
+          <button className={tab === 'builder' ? 'tab on' : 'tab'} onClick={() => setTab('builder')}>
+            시나리오 빌더
+          </button>
+        </nav>
         <div className="fleet">
           {capacity && (
             <span className={capacity.ready === capacity.expected ? 'pill ok' : 'pill warn'}>
@@ -140,6 +150,10 @@ export default function App() {
         </div>
       </header>
 
+      {tab === 'builder' ? (
+        <Builder instances={instances} onStarted={poll} />
+      ) : (
+        <>
       <ScenarioBar instances={instances} onChange={poll} />
 
       <div className="grid">
@@ -230,6 +244,8 @@ export default function App() {
           )}
         </section>
       </div>
+        </>
+      )}
     </div>
   )
 }
