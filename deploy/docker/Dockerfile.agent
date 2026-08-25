@@ -31,8 +31,9 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/mir-agent /mir-agent
 
-# 사이드카는 특권이 전혀 필요 없다. unix socket 접근은 파드
-# securityContext 의 fsGroup(65532)으로 해결한다 — deploy/k8s/base/dataplane.yaml 참조.
+# 사이드카는 특권이 전혀 필요 없다. 데이터플레인은 root 로 돌지만, C 쪽이
+# 소켓을 만들면서 chmod 0666 을 걸어 주므로(ipc_server.c) 이 nonroot(65532)가
+# 그대로 붙는다. 소켓은 두 컨테이너가 공유하는 볼륨 안에만 존재한다.
 USER nonroot:nonroot
 
 ENV MIR_IPC_SOCKET=/var/run/mir/dp.sock \

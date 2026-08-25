@@ -44,16 +44,14 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/mir-control /mir-control
 
-# 제어부도 특권이 필요 없다. k8s API 접근은 ServiceAccount 토큰으로 하며,
-# 권한은 deploy/k8s/base/control-rbac.yaml 에서 최소로 묶어 둔다.
+# 제어부는 특권이 필요 없다. 인스턴스를 조종하지 않고 관측만 하므로
+# docker.sock 도 받지 않는다 — internal/api 패키지 주석 참조.
 USER nonroot:nonroot
 
+# 함대 설정은 이미지에 굽지 않는다. 장비 구성은 배포마다 다르고, 이미지에
+# 넣으면 NIC 을 하나 바꿀 때마다 다시 빌드해야 한다. 볼륨으로 마운트한다.
 ENV MIR_HTTP_LISTEN=:8080 \
-    MIR_NAMESPACE=mir \
-    MIR_DATAPLANE_DEPLOYMENT=mir-dataplane \
-    MIR_DATAPLANE_SERVICE=mir-dataplane \
-    MIR_DATAPLANE_GRPC_PORT=9100 \
-    MIR_PF_RESOURCE=mir.io/dpdk_pf
+    MIR_FLEET_CONFIG=/etc/mir/fleet.yaml
 
 EXPOSE 8080
 

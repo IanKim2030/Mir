@@ -1,0 +1,46 @@
+# 제어부 — 장비 **한 대**에서만 돌면서 함대 전체를 관측한다.
+#
+#   docker compose -f docker-compose.control.yml up -d
+#
+# 생성 장비 중 하나에 같이 올려도 되고 별도 장비여도 된다. 다만 제어부가
+# 데이터플레인의 배타 코어를 침범하지 않도록 cpuset 을 격리 코어 **밖**으로
+# 둔다 (검증기 기준 0,1).
+services:
+  control:
+    image: mir/control:${MIR_TAG:-dev}
+    container_name: mir-control
+    restart: unless-stopped
+
+    # 격리 코어 밖. 여기를 비우면 스케줄러가 DPDK worker 코어에 올릴 수 있다.
+    cpuset: ${MIR_CONTROL_CPUSET:-0,1}
+
+    environment:
+      MIR_HTTP_LISTEN: ":8080"
+      MIR_FLEET_CONFIG: /etc/mir/fleet.yaml
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+
+      # 사이드카와 상호 인증한다. 사이드카 인증서의 SAN 에 fleet.yaml 의
+      # address 가 들어 있어야 검증을 통과한다 — 50-gen-certs.sh 가 그렇게 발급한다.
+      MIR_TLS_CERT: ${MIR_TLS_CERT:-/etc/mir/tls/control.crt}
+      MIR_TLS_KEY: ${MIR_TLS_KEY:-/etc/mir/tls/control.key}
+      MIR_TLS_CA: ${MIR_TLS_CA:-/etc/mir/tls/ca.crt}
+      MIR_INSECURE: ${MIR_INSECURE:-}
+
+    ports:
+      - "${MIR_HTTP_PORT:-8080}:8080"
+
+    volumes:
+      # 함대 설정 — 이 파일이 "어디에 무엇이 있어야 하는가"의 단일 출처다.
+      - ./fleet.yaml:/etc/mir/fleet.yaml:ro
+      - ${MIR_TLS_DIR:-./certs}:/etc/mir/tls:ro
+      # 리플레이 PCAP. 경로 문자열만 명령으로 전달되고 파일 내용은 제어 채널을 타지 않는다.
+      - ${MIR_PCAP_DIR:-/var/lib/mir/pcap}:/var/lib/mir/pcap
+
+    healthcheck:
+      # /healthz 는 liveness 다. 데이터플레인이 안 떴다고 제어부를 재시작해도
+      # 나아질 게 없으므로 여기에 함대 상태를 섞지 않는다. 함대 상태는 /readyz.
+      test: ["CMD", "/mir-control", "-healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

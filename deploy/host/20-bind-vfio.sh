@@ -172,5 +172,6 @@ done
 echo
 [[ $NOIOMMU -eq 1 ]] && \
     warn "no-IOMMU 모드다. overlays/baremetal 의 securityContext 를 privileged 로 바꿔야 한다."
-echo "이 BDF 목록을 deploy/k8s/overlays/baremetal/sriovdp-config.yaml 에 반영할 것."
-echo "다음: ./30-install-k3s.sh"
+echo "이 BDF 와 그룹 번호를 deploy/compose/.env 의 MIR_DP*_PF / MIR_DP*_VFIO_GROUP 에,"
+echo "BDF 는 함대 설정(fleet.yaml)의 pf 에도 같은 값으로 넣을 것."
+echo "다음: ./30-install-docker.sh"

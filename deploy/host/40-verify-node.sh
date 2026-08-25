@@ -15,10 +15,6 @@ bad() { printf "  \033[31m[FAIL]\033[0m %-40s %s\n" "$1" "${2:-}"; FAIL=$((FAIL+
 meh() { printf "  \033[33m[WARN]\033[0m %-40s %s\n" "$1" "${2:-}"; WARN=$((WARN+1)); }
 sec() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 
-export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-KUBECTL=""
-if command -v kubectl >/dev/null 2>&1; then KUBECTL="kubectl"
-elif command -v k3s >/dev/null 2>&1;    then KUBECTL="k3s kubectl"; fi
 
 # ─────────────────────────────────────────────────────────────
 sec "1. 커널 / IOMMU"
@@ -94,59 +90,111 @@ done
 [[ $bound -eq 0 ]] && bad "vfio-pci 바인딩된 장치 없음" "20-bind-vfio.sh 실행 필요"
 
 # ─────────────────────────────────────────────────────────────
-sec "4. Kubernetes 노드"
+sec "4. Docker"
 
-if [[ -z "$KUBECTL" ]]; then
-    bad "kubectl 없음" "30-install-k3s.sh 실행 필요"
-elif ! $KUBECTL get node >/dev/null 2>&1; then
-    bad "k8s API 응답 없음" "journalctl -u k3s -n 50"
+if ! command -v docker >/dev/null 2>&1; then
+    bad "docker 없음" "30-install-docker.sh 실행 필요"
+elif ! docker info >/dev/null 2>&1; then
+    bad "docker 데몬 응답 없음" "systemctl status docker"
 else
-    node=$($KUBECTL get node -o jsonpath='{.items[0].metadata.name}')
-    status=$($KUBECTL get node -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')
-    [[ "$status" == "True" ]] \
-        && ok  "노드 Ready" "$node" \
-        || bad "노드 NotReady" "$node"
+    ok "docker" "$(docker --version | sed 's/^Docker version //')"
 
-    alloc=$($KUBECTL get node -o jsonpath='{.items[0].status.allocatable}' 2>/dev/null)
-
-    if echo "$alloc" | grep -q "hugepages-1Gi"; then
-        ok "allocatable hugepages-1Gi" "$(echo "$alloc" | grep -oE '"hugepages-1Gi":"[^"]*"' | cut -d'"' -f4)"
-    elif echo "$alloc" | grep -q "hugepages-2Mi"; then
-        meh "allocatable hugepages-2Mi" "$(echo "$alloc" | grep -oE '"hugepages-2Mi":"[^"]*"' | cut -d'"' -f4) (1Gi 권장)"
+    if docker compose version >/dev/null 2>&1; then
+        ok "compose 플러그인" "$(docker compose version --short 2>/dev/null)"
     else
-        bad "allocatable 에 hugepages 없음" "kubelet 이 hugepage 를 인식하지 못함"
+        bad "compose 플러그인 없음" "docker-compose-plugin 설치 필요"
     fi
 
-    if echo "$alloc" | grep -q "mir.io/dpdk_pf"; then
-        ok "allocatable mir.io/dpdk_pf" "$(echo "$alloc" | grep -oE '"mir.io/dpdk_pf":"[^"]*"' | cut -d'"' -f4)"
-    else
-        meh "mir.io/dpdk_pf 없음" "SR-IOV device plugin 미배포 (deploy/k8s 단계)"
-    fi
+    # cgroup v2 여야 cpuset 이 컨테이너에 제대로 걸린다.
+    cgv=$(docker info --format '{{.CgroupVersion}}' 2>/dev/null || echo "?")
+    [[ "$cgv" == "2" ]]         && ok  "cgroup v2"         || meh "cgroup v$cgv" "v2 권장 — cpuset 동작을 반드시 확인할 것"
 fi
 
 # ─────────────────────────────────────────────────────────────
-sec "5. kubelet 정책"
+sec "5. 코어 배치"
 
-cfg=/etc/rancher/k3s/config.yaml
-if [[ -f "$cfg" ]]; then
-    grep -q "cpu-manager-policy=static" "$cfg" \
-        && ok  "cpu-manager-policy=static" \
-        || bad "cpu-manager-policy 미설정" "배타 코어 할당 불가"
-    grep -q "topology-manager-policy=single-numa-node" "$cfg" \
-        && ok  "topology-manager-policy=single-numa-node" \
-        || meh "topology-manager-policy 미설정" "NUMA 정렬 보장 안 됨"
-    grep -q "reserved-cpus=" "$cfg" \
-        && ok  "reserved-cpus" "$(grep -oE 'reserved-cpus=[^ ]*' "$cfg")" \
-        || bad "reserved-cpus 미설정" "static 정책에 필수"
+# 오케스트레이터가 없으므로 isolcpus 가 코어 격리의 **유일한 출처**다.
+# compose 의 cpuset 이 이 집합 안에 들어가야 한다.
+isolated=$(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo "")
+if [[ -n "$isolated" ]]; then
+    ok "격리 코어" "$isolated"
+
+    envf="$(dirname "$0")/../compose/.env"
+    if [[ -f "$envf" ]]; then
+        # .env 의 cpuset 이 격리 집합을 벗어나는지 본다. 벗어나면 그 인스턴스의
+        # worker 가 OS 스레드와 코어를 나눠 쓰게 되어 busy-poll 이 의미를 잃는다.
+        expand() { # "2-5,8" -> "2 3 4 5 8"
+            local out=() part lo hi
+            IFS=',' read -ra part <<< "$1"
+            for p in "${part[@]}"; do
+                if [[ "$p" == *-* ]]; then
+                    lo=${p%-*}; hi=${p#*-}
+                    for ((c=lo; c<=hi; c++)); do out+=("$c"); done
+                else
+                    out+=("$p")
+                fi
+            done
+            echo "${out[@]}"
+        }
+        iso_list=" $(expand "$isolated") "
+        bad_cpus=""
+        while IFS='=' read -r key val; do
+            [[ "$key" =~ ^MIR_DP[0-9]+_CPUSET$ ]] || continue
+            for c in $(expand "$val"); do
+                [[ "$iso_list" == *" $c "* ]] || bad_cpus="$bad_cpus $key:$c"
+            done
+        done < <(grep -E '^MIR_DP[0-9]+_CPUSET=' "$envf" 2>/dev/null || true)
+
+        [[ -z "$bad_cpus" ]]             && ok  ".env cpuset 이 격리 코어 안에 있음"             || bad ".env cpuset 이 격리 코어를 벗어남" "$bad_cpus"
+    else
+        meh "compose/.env 없음" "dataplane.env.example 을 복사해 작성할 것"
+    fi
 else
-    meh "$cfg 없음" "30-install-k3s.sh 로 생성됨"
+    bad "격리된 코어 없음" "isolcpus 미설정 — 10-kernel-cmdline.md"
 fi
 
 # ─────────────────────────────────────────────────────────────
-printf "\n\033[1m결과: %d PASS, %d WARN, %d FAIL\033[0m\n" "$PASS" "$WARN" "$FAIL"
+# 장비 두 대 이상을 한 제어부로 묶을 때만 검사한다 (MIR_REQUIRE_PTP=1).
+# 한 대짜리 구성에서는 시계가 어긋날 상대가 없다.
+if [[ "${MIR_REQUIRE_PTP:-0}" == "1" ]]; then
+    sec "6. 시계 동기 (PTP)"
+
+    if ! ls /dev/ptp* >/dev/null 2>&1; then
+        bad "PTP 하드웨어 시계 없음" "NIC 이 PHC 를 노출하지 않는다 — 60-ptp.md"
+    else
+        ok "PTP 하드웨어 시계" "$(ls /dev/ptp* | tr '
+' ' ')"
+    fi
+
+    if systemctl is-active --quiet 'ptp4l@*' 2>/dev/null || pgrep -x ptp4l >/dev/null 2>&1; then
+        ok "ptp4l 동작 중"
+    else
+        bad "ptp4l 미동작" "장비 간 텔레메트리 상관과 지연 측정이 무의미해진다"
+    fi
+
+    # ptp4l 만으로는 NIC 시계만 맞는다. 데이터플레인이 읽는 것은 CLOCK_REALTIME
+    # 이므로 phc2sys 가 PHC -> 시스템 시계로 흘려줘야 한다.
+    if systemctl is-active --quiet 'phc2sys@*' 2>/dev/null || pgrep -x phc2sys >/dev/null 2>&1; then
+        ok "phc2sys 동작 중"
+    else
+        bad "phc2sys 미동작" "NIC 시계만 맞고 시스템 시계는 그대로다 — 60-ptp.md"
+    fi
+
+    # NTP 데몬이 함께 돌면 두 소스가 시스템 시계를 서로 밀어내며 진동한다.
+    for svc in chronyd systemd-timesyncd ntpd; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            bad "$svc 가 PTP 와 함께 동작 중" "시계 소스는 하나만 남길 것"
+        fi
+    done
+fi
+
+# ─────────────────────────────────────────────────────────────
+printf "
+[1m결과: %d PASS, %d WARN, %d FAIL[0m
+" "$PASS" "$WARN" "$FAIL"
 if [[ $FAIL -gt 0 ]]; then
     echo "FAIL 항목을 해결한 뒤 다시 실행할 것. docs/DEPLOYMENT.md 트러블슈팅 절 참조."
     exit 1
 fi
-echo "노드 사전조건 충족. 다음: kubectl apply -k deploy/k8s/overlays/baremetal"
+echo "장비 사전조건 충족. 다음: deploy/compose/ 에서 docker compose up -d"
 exit 0

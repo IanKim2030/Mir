@@ -1,0 +1,186 @@
+# 생성 장비 한 대분 구성 — PF 하나당 (dataplane + agent) 쌍 하나.
+#
+# 이 파일은 **모든 생성 장비에서 동일**하고, 장비별로 다른 값은 전부 .env 로 뺀다.
+#   cp dataplane.env.example .env && $EDITOR .env
+#   docker compose -f docker-compose.dataplane.yml up -d
+#
+# ★ 배치가 스케줄러가 아니라 하드웨어로 정해진다는 게 이 파일의 전제다.
+#   PF 는 이 장비의 PCIe 슬롯에 꽂혀 있고, 컨테이너는 그 PF 를 이름으로 직접
+#   집는다. 그래서 인스턴스와 PF 의 대응이 재시작·재배포에도 변하지 않는다.
+
+x-dataplane: &dataplane
+  image: mir/dataplane:${MIR_TAG:-dev}
+
+  # vfio 로 커널 네트워크 스택을 통째로 우회하므로 netns 가 필요 없다.
+  # 제어 채널은 사이드카가 unix socket 으로 받는다.
+  network_mode: none
+
+  cap_add:
+    - IPC_LOCK   # hugepage mlock
+    - SYS_NICE   # 스레드 우선순위/affinity
+
+  # rte_eal_cleanup 과 hugepage 반납에 시간을 준다.
+  stop_grace_period: 30s
+  restart: unless-stopped
+
+x-agent: &agent
+  image: mir/agent:${MIR_TAG:-dev}
+
+  # 제어부가 **장비 밖에서** 닿아야 하므로 호스트 netns 를 쓴다.
+  # 제어 트래픽뿐이라 성능 영향이 없다.
+  network_mode: host
+  restart: unless-stopped
+
+x-agent-tls: &agent-tls
+  # 이 포트는 장비 밖으로 열린다. 인증이 없으면 여기 닿는 누구나 라인레이트
+  # 송신을 시킬 수 있으므로 mTLS 가 기본이다.
+  #   ./deploy/host/50-gen-certs.sh certs/ <이 장비 주소>
+  # 개발 중 잠깐 끄려면 .env 에 MIR_INSECURE=1 (양쪽 모두 경고를 남긴다).
+  MIR_TLS_CERT: ${MIR_TLS_CERT:-/etc/mir/tls/agent.crt}
+  MIR_TLS_KEY: ${MIR_TLS_KEY:-/etc/mir/tls/agent.key}
+  MIR_TLS_CA: ${MIR_TLS_CA:-/etc/mir/tls/ca.crt}
+  MIR_INSECURE: ${MIR_INSECURE:-}
+
+services:
+  # ── 인스턴스 0 — 항상 뜬다 ────────────────────────────────
+  dp0:
+    <<: *dataplane
+    container_name: ${MIR_MACHINE}-dp0
+    cpuset: ${MIR_DP0_CPUSET}
+    environment:
+      # 컨테이너 entrypoint 가 바이너리 직행이라 셸이 HOSTNAME 을 만들어 주지
+      # 않는다. EAL --file-prefix 와 텔레메트리 node_id 가 이 값을 쓰므로
+      # **함대 설정의 인스턴스 이름과 반드시 같아야 한다**.
+      HOSTNAME: ${MIR_MACHINE}-dp0
+      MIR_DEVICE_SPEC: pci:${MIR_DP0_PF}
+      MIR_MEM_MB: ${MIR_MEM_MB:-4096}
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    devices:
+      - /dev/vfio/vfio
+      - /dev/vfio/${MIR_DP0_VFIO_GROUP}
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - ipc0:/var/run/mir
+
+  agent0:
+    <<: *agent
+    container_name: ${MIR_MACHINE}-agent0
+    environment:
+      <<: *agent-tls
+      MIR_GRPC_LISTEN: ":${MIR_DP0_PORT:-9100}"
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    volumes:
+      - ipc0:/var/run/mir
+      - ${MIR_TLS_DIR:-./certs}:/etc/mir/tls:ro
+    depends_on:
+      - dp0
+
+  # ── 인스턴스 1~3 — COMPOSE_PROFILES 로 켠다 ────────────────
+  # 첫 기동은 프로파일 없이(= dp0 하나만) 확인하고 늘리는 순서를 권한다.
+  dp1:
+    <<: *dataplane
+    profiles: ["dp1"]
+    container_name: ${MIR_MACHINE}-dp1
+    cpuset: ${MIR_DP1_CPUSET}
+    environment:
+      HOSTNAME: ${MIR_MACHINE}-dp1
+      MIR_DEVICE_SPEC: pci:${MIR_DP1_PF}
+      MIR_MEM_MB: ${MIR_MEM_MB:-4096}
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    devices:
+      - /dev/vfio/vfio
+      - /dev/vfio/${MIR_DP1_VFIO_GROUP}
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - ipc1:/var/run/mir
+
+  agent1:
+    <<: *agent
+    profiles: ["dp1"]
+    container_name: ${MIR_MACHINE}-agent1
+    environment:
+      <<: *agent-tls
+      MIR_GRPC_LISTEN: ":${MIR_DP1_PORT:-9101}"
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    volumes:
+      - ipc1:/var/run/mir
+      - ${MIR_TLS_DIR:-./certs}:/etc/mir/tls:ro
+    depends_on:
+      - dp1
+
+  dp2:
+    <<: *dataplane
+    profiles: ["dp2"]
+    container_name: ${MIR_MACHINE}-dp2
+    cpuset: ${MIR_DP2_CPUSET}
+    environment:
+      HOSTNAME: ${MIR_MACHINE}-dp2
+      MIR_DEVICE_SPEC: pci:${MIR_DP2_PF}
+      MIR_MEM_MB: ${MIR_MEM_MB:-4096}
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    devices:
+      - /dev/vfio/vfio
+      - /dev/vfio/${MIR_DP2_VFIO_GROUP}
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - ipc2:/var/run/mir
+
+  agent2:
+    <<: *agent
+    profiles: ["dp2"]
+    container_name: ${MIR_MACHINE}-agent2
+    environment:
+      <<: *agent-tls
+      MIR_GRPC_LISTEN: ":${MIR_DP2_PORT:-9102}"
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    volumes:
+      - ipc2:/var/run/mir
+      - ${MIR_TLS_DIR:-./certs}:/etc/mir/tls:ro
+    depends_on:
+      - dp2
+
+  dp3:
+    <<: *dataplane
+    profiles: ["dp3"]
+    container_name: ${MIR_MACHINE}-dp3
+    cpuset: ${MIR_DP3_CPUSET}
+    environment:
+      HOSTNAME: ${MIR_MACHINE}-dp3
+      MIR_DEVICE_SPEC: pci:${MIR_DP3_PF}
+      MIR_MEM_MB: ${MIR_MEM_MB:-4096}
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    devices:
+      - /dev/vfio/vfio
+      - /dev/vfio/${MIR_DP3_VFIO_GROUP}
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - ipc3:/var/run/mir
+
+  agent3:
+    <<: *agent
+    profiles: ["dp3"]
+    container_name: ${MIR_MACHINE}-agent3
+    environment:
+      <<: *agent-tls
+      MIR_GRPC_LISTEN: ":${MIR_DP3_PORT:-9103}"
+      MIR_IPC_SOCKET: /var/run/mir/dp.sock
+      MIR_LOG_LEVEL: ${MIR_LOG_LEVEL:-info}
+    volumes:
+      - ipc3:/var/run/mir
+      - ${MIR_TLS_DIR:-./certs}:/etc/mir/tls:ro
+    depends_on:
+      - dp3
+
+# dp.sock 이 여기 생긴다. 컨테이너 쌍마다 별도 볼륨이라 서로 섞이지 않는다.
+volumes:
+  ipc0:
+  ipc1:
+  ipc2:
+  ipc3:

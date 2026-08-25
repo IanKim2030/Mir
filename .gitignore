@@ -1,0 +1,21 @@
+# 빌드 산출물
+dataplane/build/
+control/bin/
+*.o
+*.a
+
+# 장비별 설정 — 예제(*.example)만 커밋한다
+deploy/compose/.env
+deploy/compose/fleet.yaml
+
+# 인증서와 키. 특히 .key 는 절대 커밋하지 말 것.
+deploy/compose/certs/
+*.key
+*.crt
+*.csr
+*.srl
+*.ext
+
+# 편집기
+.vscode/
+.idea/

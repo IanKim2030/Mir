@@ -37,30 +37,39 @@ sudo reboot
 
 | 파라미터 | 역할 | 값 결정 기준 |
 |---|---|---|
-| `intel_iommu=on` | IOMMU 활성화 → vfio-pci 정상 모드 → **비특권 파드** 가능 | 고정 |
+| `intel_iommu=on` | IOMMU 활성화 → vfio-pci 정상 모드 → **비특권 컨테이너** 가능 | 고정 |
 | `iommu=pt` | passthrough 모드. DMA 리매핑 오버헤드 제거 | 고정 |
 | `default_hugepagesz=1G hugepagesz=1G` | 1GB 페이지를 기본으로. **1GB는 부팅 시에만 예약 가능** | 고정 |
-| `hugepages=16` | 1GB 페이지 개수 = 총 16GB | `데이터플레인 파드 수 × 파드당 hugepage` 이상 |
+| `hugepages=16` | 1GB 페이지 개수 = 총 16GB | `인스턴스 수 × MIR_MEM_MB` 이상 |
 | `isolcpus=...` | 커널 스케줄러가 해당 코어에 태스크를 올리지 않음 | 아래 "코어 배분" |
 | `nohz_full=...` | 해당 코어의 주기적 타이머 틱 제거 | `isolcpus` 와 동일 집합 |
 | `rcu_nocbs=...` | RCU 콜백을 다른 코어로 오프로드 | `nohz_full` 과 동일 집합 |
 
 ### 코어 배분 규칙
 
-`isolcpus` / `nohz_full` / `rcu_nocbs` 는 **반드시 같은 집합**이어야 하고,
-그 여집합이 다음 단계의 kubelet `reserved-cpus` 가 된다.
+`isolcpus` / `nohz_full` / `rcu_nocbs` 는 **반드시 같은 집합**이어야 한다.
+
+**`isolcpus` 가 코어 격리의 유일한 출처다.** 오케스트레이터에게 "코어 5개
+달라"고 요청하고 받아쓰는 방식이 아니라, `deploy/compose/.env` 의
+`MIR_DP*_CPUSET` 에 여기서 정한 코어를 **그대로 적어 넣는다**. 두 값이
+어긋나면 `40-verify-node.sh` 가 FAIL 로 잡는다.
 
 ```
 검증기 전체 코어 0-23 (HT off 기준)
-  ├─ 0,1        → OS / kubelet / 시스템 데몬 / 사이드카   → reserved-cpus=0,1
-  └─ 2-23       → isolcpus, DPDK worker 전용 (22코어)    → CPU Manager가 파드에 배타 할당
+  ├─ 0,1        → OS / 시스템 데몬 / 사이드카 / 제어부
+  └─ 2-23       → isolcpus, DPDK worker 전용 (22코어)
+       ├─ 2-6    → MIR_DP0_CPUSET
+       ├─ 7-11   → MIR_DP1_CPUSET
+       ├─ 12-16  → MIR_DP2_CPUSET
+       └─ 17-21  → MIR_DP3_CPUSET   (22,23 은 여유)
 ```
 
-데이터플레인 파드는 PF 하나당 하나이므로 **4개**(X710 4포트), 파드당 `cpu: "5"`
+인스턴스는 PF 하나당 하나이므로 **4개**(X710 4포트), 인스턴스당 5코어
 (main 1 + worker 4) → 20코어. `isolcpus` 22코어 안에 들어간다.
 
 > NUMA 2소켓이면 **NIC이 붙은 소켓의 코어만** 데이터플레인에 할당되도록
-> Topology Manager `single-numa-node` 정책이 처리한다 — `30-install-k3s.sh` 참조.
+> 데이터플레인이 `MIR_MEM_MB` 와 `/sys` 의 NUMA 토폴로지를 읽어 자기 코어가 있는
+> 소켓에만 hugepage 를 배정한다 — `dataplane/src/eal_args.c` 의 `resolve_memory`.
 > 검증기는 1소켓이라 해당 없음. 목표기(2소켓)에서는 필수다.
 
 ### ⚠️ 검증기의 현재 설정이 왜 무효인가
@@ -118,10 +127,9 @@ echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
 
 **대가를 명확히 인지할 것:**
 
-- 컨테이너가 **임의의 물리 메모리에 DMA** 할 수 있다 → 파드 격리 경계가 사실상 사라진다
-- 데이터플레인 컨테이너를 `privileged: true` 로 돌려야 한다
-- `deploy/k8s/overlays/baremetal/kustomization.yaml` 의 securityContext 패치를
-  그에 맞게 바꿔야 한다
+- 컨테이너가 **임의의 물리 메모리에 DMA** 할 수 있다 → 컨테이너 격리 경계가 사실상 사라진다
+- `deploy/compose/docker-compose.dataplane.yml` 의 `x-dataplane` 앵커에
+  `privileged: true` 를 추가해야 한다
 
 전용 테스트 장비가 아니라면 권장하지 않는다. 이 경로를 택했다면
 [../../docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md) 에 그 사실을 기록해 두어야
