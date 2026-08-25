@@ -16,6 +16,7 @@
 #include <rte_memcpy.h>
 
 #include "pktbuild.h"
+#include "rx_engine.h"
 #include "stats.h"
 
 #define LOG(level, fmt, ...) \
@@ -197,18 +198,20 @@ int mir_tx_start(const Mir__V1__StartScenarioRequest *req,
         return -1;
     }
 
-    /* worker 로 쓸 lcore 를 고른다. main lcore 는 제어 스레드 몫이라 제외한다. */
+    /* worker 로 쓸 lcore 를 고른다. main lcore(제어 스레드)와 RX lcore(상시
+     * 수신 폴링)는 제외한다 — 둘 다 이미 다른 일로 그 코어를 점유한다. */
     unsigned main_lcore = rte_get_main_lcore();
+    unsigned rx_lcore   = mir_rx_lcore();
     uint32_t avail = 0;
     for (size_t i = 0; i < n_lcores && avail < RTE_MAX_LCORE; i++) {
-        if (lcores[i] == main_lcore)
+        if (lcores[i] == main_lcore || lcores[i] == rx_lcore)
             continue;
         g.worker_lcore[avail++] = lcores[i];
     }
     if (avail == 0) {
         seterr(err, errlen,
-               "worker 로 쓸 lcore 가 없다 (cpuset 에 코어가 %zu개뿐이고 "
-               "그중 하나는 제어 스레드가 쓴다)", n_lcores);
+               "worker 로 쓸 lcore 가 없다 (cpuset 코어 %zu개 중 하나는 제어 "
+               "스레드, 하나는 RX 폴링이 쓴다)", n_lcores);
         return -1;
     }
 
@@ -303,7 +306,9 @@ int mir_tx_start(const Mir__V1__StartScenarioRequest *req,
             seterr(err, errlen, "lcore %u launch 실패 (%d) — 이미 다른 작업이 도는가",
                    c->lcore_id, rc);
             g.stop = 1;
-            rte_eal_mp_wait_lcore();
+            /* 이미 launch 된 worker 만 기다린다 (RX lcore 는 전체 대기에 걸린다). */
+            for (uint32_t j = 0; j < i; j++)
+                rte_eal_wait_lcore(g.worker_lcore[j]);
             mir_pkt_set_free(&g.pkts);
             return -1;
         }
@@ -342,10 +347,15 @@ static int all_workers_done(void)
     return 1;
 }
 
-/* 실행이 끝난 시나리오의 자원을 회수한다. worker 는 이미 멈춰 있어야 한다. */
+/* 실행이 끝난 시나리오의 자원을 회수한다. worker 는 이미 멈춰 있어야 한다.
+ *
+ * ★ rte_eal_mp_wait_lcore()(전체 대기)를 쓰면 안 된다. RX lcore 는 상시 폴링이라
+ *   영원히 RUNNING 이고, 전체 대기는 그걸 기다리다 제어 스레드를 영구 블록한다.
+ *   TX worker 만 개별로 기다린다. */
 static void reap(void)
 {
-    rte_eal_mp_wait_lcore();     /* FINISHED 상태 lcore 를 WAIT 으로 되돌린다 */
+    for (uint32_t i = 0; i < g.n_workers; i++)
+        rte_eal_wait_lcore(g.worker_lcore[i]);
     mir_pkt_set_free(&g.pkts);
     g.running = 0;
     memset(&g.status, 0, sizeof(g.status));

@@ -46,6 +46,7 @@
 #include "eal_args.h"
 #include "ipc_server.h"
 #include "port.h"
+#include "rx_engine.h"
 #include "stats.h"
 #include "tx_engine.h"
 #include "tx_hello.h"
@@ -300,28 +301,58 @@ int main(void)
     else
         LOG(INFO, "포트 %zu개 인식", n_ports);
 
-    /* ── 4. 포트 구성·start ───────────────────────────────────── */
-    static mir_port dev[MIR_MAX_PORTS];
-
-    /* TX 큐는 worker lcore 수만큼 만든다 — worker 하나가 큐 하나를 독점하는
-     * 것이 tx_engine 의 전제다. main lcore 는 제어 스레드 몫이라 뺀다.
+    /* ── 4. lcore 배치 ────────────────────────────────────────── */
+    /*
+     * main   = 제어 스레드 (IPC 서버)
+     * RX     = 상시 수신 폴링 (Phase 3) — 하나를 잡아 종료까지 돈다
+     * 나머지 = TX worker
      *
-     * 큐를 시나리오 시작 시점에 늘릴 수는 없다. rte_eth_dev_configure 는
-     * 포트를 stop 한 상태에서만 되고, 그러면 링크가 내려갔다 올라온다. */
-    uint16_t n_tx_q = (uint16_t)(args.n_lcores > 1 ? args.n_lcores - 1 : 1);
+     * RX 를 상시 켜 두는 이유: 판정은 블라스트 중이 아니어도 켜져 있어야 한다.
+     * 유휴 상태에서 상대가 RST 를 쏘는 것도 잡아야 하기 때문이다. 대가는 코어
+     * 하나를 항상 점유하는 것이고, 코어가 귀해지는 Phase 7 에서 재검토한다. */
+    unsigned main_lcore = rte_get_main_lcore();
+    unsigned rx_lcore   = RTE_MAX_LCORE;
+    for (size_t i = 0; i < args.n_lcores; i++) {
+        if (args.lcores[i] != main_lcore) {
+            rx_lcore = args.lcores[i];   /* main 이 아닌 첫 lcore 를 RX 로 */
+            break;
+        }
+    }
+
+    /* TX 큐는 worker 수만큼. worker = 전체 - main - RX.
+     * 큐를 시나리오 시작 시점에 늘릴 수는 없다 — rte_eth_dev_configure 는 포트
+     * stop 상태에서만 되고, 그러면 링크가 내려갔다 올라온다. */
+    uint16_t n_workers = (uint16_t)(args.n_lcores > 2 ? args.n_lcores - 2 : 1);
+
+    /* ── 5. 포트 구성·start ───────────────────────────────────── */
+    static mir_port dev[MIR_MAX_PORTS];
 
     for (size_t i = 0; i < n_ports; i++) {
         char perr[256] = {0};
-        if (mir_port_setup(ports[i].port_id, n_tx_q, &dev[i], perr, sizeof(perr)) != 0) {
+        if (mir_port_setup(ports[i].port_id, n_workers, &dev[i], perr, sizeof(perr)) != 0) {
             LOG(ERR, "port %u 구성 실패: %s", ports[i].port_id, perr);
             continue;
         }
         ports[i].started = 1;
-        LOG(INFO, "port %u: TX 큐 %u개 (worker lcore 수)", ports[i].port_id, n_tx_q);
+        LOG(INFO, "port %u: TX 큐 %u개 (worker), RX 큐 1개", ports[i].port_id, n_workers);
         mir_port_wait_link(ports[i].port_id, LINK_WAIT_MS, NULL);
     }
 
-    /* ── 5. hello packet 송신 ─────────────────────────────────── */
+    /* ── 6. RX 폴링 시작 (첫 start 된 포트에서) ───────────────── */
+    if (rx_lcore != RTE_MAX_LCORE) {
+        for (size_t i = 0; i < n_ports; i++) {
+            if (!dev[i].started)
+                continue;
+            char rerr[256] = {0};
+            if (mir_rx_start(&dev[i], rx_lcore, rerr, sizeof(rerr)) != 0)
+                LOG(ERR, "RX 폴링 시작 실패: %s", rerr);
+            break;   /* 인스턴스당 PF 하나 — 첫 포트만 */
+        }
+    } else {
+        LOG(WARNING, "RX 폴링용 lcore 가 없다 (코어가 부족하다) — 수신 판정 비활성");
+    }
+
+    /* ── 7. hello packet 송신 ─────────────────────────────────── */
     run_hello_tx(ports, dev, n_ports);
 
     /* ── 6. 제어 스레드 기동 ──────────────────────────────────── */
@@ -374,9 +405,10 @@ int main(void)
      * 만들며 rte_eth_stats_get() 을 부르는 도중에 포트가 닫히는 일이 없다. */
     ipc_server_stop();
 
-    /* worker 가 아직 tx_burst 를 돌고 있는데 포트를 닫으면 그대로 깨진다.
+    /* worker 가 아직 tx/rx_burst 를 돌고 있는데 포트를 닫으면 그대로 깨진다.
      * 반드시 포트보다 먼저 세운다. */
     mir_tx_shutdown();
+    mir_rx_stop();
 
     for (size_t i = 0; i < n_ports; i++)
         mir_port_close(&dev[i]);

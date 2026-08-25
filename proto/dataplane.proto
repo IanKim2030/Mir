@@ -246,6 +246,29 @@ message TelemetrySnapshot {
   // worker 가 tx_burst 에 넣지 못해 버린 패킷 누계.
   // 이 값이 늘면 NIC 이 요구 속도를 못 따라가고 있다는 뜻이다.
   uint64 tx_drop = 8;
+
+  // 수신 분류 (RX lcore 가 프레임을 파싱해 집계).
+  //
+  // **개별 응답 패킷은 경계를 넘지 않는다.** SYN 홍수에 상대가 초당 수백만
+  // SYN-ACK 를 돌려줘도 그걸 하나씩 올리는 건 성립하지 않는다. 그래서 판정은
+  // 여기 카운터로 집계하고, 이벤트(Event)는 이상동작만 표본으로 올린다.
+  RxClass rx = 9;
+}
+
+// TCP 플래그별 수신 분류. handshake 검증의 1차 지표다.
+//
+//   포트 열림  → SYN 홍수에 syn_ack 가 오른다
+//   포트 닫힘  → rst 가 오른다
+//   무응답     → 둘 다 그대로 (SYN-ACK timeout 판정은 흐름 상태가 필요한 Phase 4)
+message RxClass {
+  uint64 tcp_syn     = 1;  // SYN only (우리 쪽으로 걸어오는 연결 시도)
+  uint64 tcp_syn_ack = 2;  // SYN+ACK (우리 SYN 에 대한 응답 — 포트 열림)
+  uint64 tcp_rst     = 3;  // RST (포트 닫힘 / 거부)
+  uint64 tcp_fin     = 4;  // FIN 포함
+  uint64 tcp_ack     = 5;  // ACK only (데이터/핸드셰이크 3단계)
+  uint64 tcp_other   = 6;  // 위 어디에도 안 맞는 플래그 조합
+  uint64 udp         = 7;
+  uint64 non_ip      = 8;  // ARP 등 비 IPv4
 }
 
 // ─────────────────────────────────────────────────────────────

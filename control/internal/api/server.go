@@ -53,6 +53,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/scenarios/start", s.startScenario)
 	mux.HandleFunc("POST /api/scenarios/stop", s.stopScenario)
 
+	// 수신 판정 (Phase 3)
+	mux.HandleFunc("GET /api/events", s.listEvents)
+
 	return mux
 }
 
@@ -148,6 +151,20 @@ type instanceView struct {
 	ActiveScenario string `json:"activeScenario,omitempty"`
 	TxLcores       uint32 `json:"txLcores,omitempty"`
 	TxDrop         uint64 `json:"txDrop,omitempty"`
+
+	// 수신 분류 (Phase 3). handshake 응답을 집계한 것.
+	Rx *rxClass `json:"rx,omitempty"`
+}
+
+type rxClass struct {
+	TCPSyn    uint64 `json:"tcpSyn"`
+	TCPSynAck uint64 `json:"tcpSynAck"`
+	TCPRst    uint64 `json:"tcpRst"`
+	TCPFin    uint64 `json:"tcpFin"`
+	TCPAck    uint64 `json:"tcpAck"`
+	TCPOther  uint64 `json:"tcpOther"`
+	UDP       uint64 `json:"udp"`
+	NonIP     uint64 `json:"nonIp"`
 }
 
 type machineView struct {
@@ -239,6 +256,13 @@ func (s *Server) instanceViews() []instanceView {
 			v.ActiveScenario = st.Telemetry.ActiveScenario
 			v.TxLcores = st.Telemetry.TxLcores
 			v.TxDrop = st.Telemetry.TxDrop
+			if rx := st.Telemetry.Rx; rx != nil {
+				v.Rx = &rxClass{
+					TCPSyn: rx.TcpSyn, TCPSynAck: rx.TcpSynAck,
+					TCPRst: rx.TcpRst, TCPFin: rx.TcpFin, TCPAck: rx.TcpAck,
+					TCPOther: rx.TcpOther, UDP: rx.Udp, NonIP: rx.NonIp,
+				}
+			}
 		}
 
 		switch {

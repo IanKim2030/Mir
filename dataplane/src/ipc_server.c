@@ -2,6 +2,7 @@
 
 #include "ipc_server.h"
 #include "stats.h"
+#include "events.h"
 #include "tx_engine.h"
 
 #include <errno.h>
@@ -185,6 +186,41 @@ static size_t pack_ack(const void *m, uint8_t *out)
 {
     return mir__v1__ack__pack(m, out);
 }
+static size_t pack_event(const void *m, uint8_t *out)
+{
+    return mir__v1__event__pack(m, out);
+}
+
+/*
+ * 이벤트 링을 비우고 각 이벤트를 EVENT 프레임으로 보낸다 (제어 스레드에서).
+ *
+ * 판정은 RX lcore 에서 링에 넣기만 하고, 실제 전송(인코딩+socket write)은
+ * 여기서 한다 — busy-poll 하는 RX lcore 를 socket I/O 로 멈추게 두지 않는다.
+ * 한 번에 최대 EVENT_DRAIN_MAX 개만 보내 텔레메트리 주기를 방해하지 않는다.
+ */
+#define EVENT_DRAIN_MAX 64
+
+static int send_events(int fd)
+{
+    mir_event evs[EVENT_DRAIN_MAX];
+    unsigned n = mir_events_drain(evs, EVENT_DRAIN_MAX);
+
+    for (unsigned i = 0; i < n; i++) {
+        Mir__V1__Event ev = MIR__V1__EVENT__INIT;
+        ev.ts_ns    = evs[i].ts_ns;
+        ev.kind     = (Mir__V1__Event__Kind)evs[i].kind;
+        ev.port_id  = evs[i].port_id;
+        ev.flow_key = evs[i].flow_key;
+        ev.rtt_us   = evs[i].rtt_us;
+        ev.detail   = evs[i].detail;
+
+        size_t len = mir__v1__event__get_packed_size(&ev);
+        if (send_packed(fd, MIR__V1__MSG_TYPE__MSG_TYPE_EVENT,
+                        len, pack_event, &ev) != 0)
+            return -1;
+    }
+    return 0;
+}
 
 static int send_hello_response(int fd)
 {
@@ -267,6 +303,17 @@ static int send_telemetry(int fd)
     snap.event_drop    = total.event_drop;
     snap.active_lcores = (uint32_t)g_cfg.n_lcores;
     snap.tx_drop       = total.tx_drop;
+
+    Mir__V1__RxClass rx = MIR__V1__RX_CLASS__INIT;
+    rx.tcp_syn     = total.rx_tcp_syn;
+    rx.tcp_syn_ack = total.rx_tcp_syn_ack;
+    rx.tcp_rst     = total.rx_tcp_rst;
+    rx.tcp_fin     = total.rx_tcp_fin;
+    rx.tcp_ack     = total.rx_tcp_ack;
+    rx.tcp_other   = total.rx_tcp_other;
+    rx.udp         = total.rx_udp;
+    rx.non_ip      = total.rx_non_ip;
+    snap.rx        = &rx;
 
     /* 포트 카운터만으로는 "누가 시켜서 나가는 트래픽인지" 알 수 없다.
      * 데이터플레인이 스스로 무엇을 하고 있다고 생각하는지를 올려야
@@ -491,6 +538,14 @@ static void *server_thread(void *arg)
                 }
                 free(payload);
             }
+        }
+
+        /* 이벤트는 매 루프 비운다 (POLL_TIMEOUT_MS 주기). 텔레메트리보다 자주
+         * 보내야 이상동작을 빨리 알린다. 링이 비어 있으면 비용이 없다. */
+        if (cfd >= 0 && send_events(cfd) != 0) {
+            LOG(WARNING, "이벤트 전송 실패 — 연결을 닫는다");
+            close(cfd);
+            cfd = -1;
         }
 
         /* 텔레메트리 주기 push */

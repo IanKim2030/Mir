@@ -47,6 +47,16 @@ type Status struct {
 	LastSeen  time.Time             `json:"lastSeen"`
 }
 
+// RecentEvent 는 인스턴스 이름을 붙인 판정 이벤트다.
+type RecentEvent struct {
+	Instance string    `json:"instance"`
+	Event    *pb.Event `json:"-"`
+}
+
+// eventBufSize 는 링 버퍼 크기. 이벤트는 이미 데이터플레인에서 레이트 제한돼
+// 올라오므로(종류당 5개/초) 이 정도면 최근 수 분을 담는다.
+const eventBufSize = 512
+
 type Registry struct {
 	resolver Resolver
 	creds    credentials.TransportCredentials
@@ -55,6 +65,11 @@ type Registry struct {
 
 	mu    sync.RWMutex
 	peers map[string]*peer // key = "host:port"
+
+	evMu   sync.Mutex
+	events []RecentEvent // 링 버퍼
+	evNext int           // 다음 쓸 위치
+	evSeen uint64        // 총 수신 수 (버퍼를 넘어 흘러간 것 포함)
 }
 
 func New(
@@ -69,10 +84,43 @@ func New(
 		version:  version,
 		log:      log,
 		peers:    make(map[string]*peer),
+		events:   make([]RecentEvent, 0, eventBufSize),
 	}
 }
 
+// addEvent 는 이벤트를 링 버퍼에 넣는다 (peer 의 이벤트 고루틴에서 호출).
+func (r *Registry) addEvent(instance string, ev *pb.Event) {
+	r.evMu.Lock()
+	defer r.evMu.Unlock()
+
+	r.evSeen++
+	re := RecentEvent{Instance: instance, Event: ev}
+	if len(r.events) < eventBufSize {
+		r.events = append(r.events, re)
+		return
+	}
+	r.events[r.evNext] = re
+	r.evNext = (r.evNext + 1) % eventBufSize
+}
+
+// Events 는 최근 이벤트를 시간순(오래된 것 → 최신)으로 돌려준다.
+func (r *Registry) Events() ([]RecentEvent, uint64) {
+	r.evMu.Lock()
+	defer r.evMu.Unlock()
+
+	out := make([]RecentEvent, 0, len(r.events))
+	if len(r.events) < eventBufSize {
+		out = append(out, r.events...)
+	} else {
+		// 링이 꽉 찼으면 evNext 부터가 가장 오래된 것이다.
+		out = append(out, r.events[r.evNext:]...)
+		out = append(out, r.events[:r.evNext]...)
+	}
+	return out, r.evSeen
+}
+
 type peer struct {
+	reg    *Registry
 	addr   string
 	name   string
 	cc     *grpc.ClientConn
@@ -147,6 +195,7 @@ func (r *Registry) dial(ctx context.Context, addr, name string) (*peer, error) {
 
 	pctx, cancel := context.WithCancel(ctx)
 	p := &peer{
+		reg:    r,
 		addr:   addr,
 		name:   name,
 		cc:     cc,
@@ -245,6 +294,13 @@ func (p *peer) handshakeAndStream(ctx context.Context, version string, log *slog
 		return false
 	}
 
+	// 이벤트 스트림은 별도 고루틴에서 소비한다. 텔레메트리 스트림이 끊기면
+	// 이 attempt 를 취소해 이벤트 고루틴도 함께 정리한다 — 두 스트림의
+	// 수명을 한 attempt 로 묶는다.
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	defer cancelAttempt()
+	go p.consumeEvents(attemptCtx, log)
+
 	for {
 		snap, err := stream.Recv()
 		if err != nil {
@@ -258,6 +314,24 @@ func (p *peer) handshakeAndStream(ctx context.Context, version string, log *slog
 		p.telemetry = snap
 		p.lastSeen = time.Now()
 		p.mu.Unlock()
+	}
+}
+
+// consumeEvents 는 판정 이벤트 스트림을 registry 의 링 버퍼로 흘린다.
+// 실패는 치명적이지 않다 — 이벤트는 표본이고, 텔레메트리 쪽이 재연결을 주도한다.
+func (p *peer) consumeEvents(ctx context.Context, log *slog.Logger) {
+	stream, err := p.client.StreamEvents(ctx, &pb.StreamEventsRequest{})
+	if err != nil {
+		return
+	}
+	for {
+		ev, err := stream.Recv()
+		if err != nil {
+			return
+		}
+		p.reg.addEvent(p.name, ev)
+		log.Debug("판정 이벤트",
+			"instance", p.name, "kind", ev.Kind.String(), "flow", ev.FlowKey)
 	}
 }
 
