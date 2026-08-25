@@ -53,11 +53,12 @@ sudo ./deploy/host/20-bind-vfio.sh                    # 후보 목록
 sudo ./deploy/host/20-bind-vfio.sh 0000:3b:00.0       # 바인딩
 ```
 
-스크립트 수정은 필요 없다. 마지막 줄의 `다음: ./30-install-docker.sh` 안내와
-`sriovdp-config.yaml 에 반영할 것` 안내는 **S 형태에서 무시**한다. 대신 출력된 BDF 를
+스크립트 수정은 필요 없다. 마지막 줄의 `다음: ./30-install-docker.sh` 와
+`.env / fleet.yaml 에 넣을 것` 안내는 **S 형태에서 무시**한다. 대신 출력된 BDF 를
 3절의 인스턴스 설정 파일에 적는다.
 
-`driverctl` 이 설치돼 있어야 재부팅 후에도 바인딩이 유지된다(`sudo apt install driverctl`).
+재부팅 후 바인딩 유지는 스크립트가 설치하는 `mir-vfio-bind.service` 가 담당한다
+(`/etc/mir/vfio-bdfs` 의 목록을 읽는다). S 형태에서도 그대로 동작한다.
 
 ### 1-3. Docker 설치 — 건너뛴다
 
@@ -461,11 +462,19 @@ sudo systemctl disable --now mir@0.target mir-dataplane@0 mir-agent@0
 sudo rm /etc/systemd/system/mir-{dataplane,agent}@.service /etc/systemd/system/mir@.target
 sudo systemctl daemon-reload
 
+# NIC 을 커널 드라이버로 되돌린다 (부팅 시 재바인딩부터 끈다)
+sudo systemctl disable --now mir-vfio-bind.service
+sudo rm -f /etc/systemd/system/mir-vfio-bind.service /usr/local/sbin/mir-vfio-bind
+sudo systemctl daemon-reload
+
+for bdf in 0000:3b:00.0; do
+    echo "$bdf" | sudo tee /sys/bus/pci/devices/$bdf/driver/unbind >/dev/null
+    echo "" | sudo tee /sys/bus/pci/devices/$bdf/driver_override >/dev/null
+    echo "$bdf" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
+done
+
 sudo rm -rf /etc/mir /run/mir
 sudo rm /usr/local/bin/mir-dataplane /usr/local/bin/mir-agent
-
-# NIC 을 커널 드라이버로 되돌린다
-sudo driverctl unset-override 0000:3b:00.0
 
 # 커널 파라미터 원복이 필요하면 /etc/default/grub 에서 hugepages/isolcpus 를 지우고
 # sudo update-grub && sudo reboot

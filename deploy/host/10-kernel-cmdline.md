@@ -72,12 +72,13 @@ sudo reboot
 > 소켓에만 hugepage 를 배정한다 — `dataplane/src/eal_args.c` 의 `resolve_memory`.
 > 검증기는 1소켓이라 해당 없음. 목표기(2소켓)에서는 필수다.
 
-### ⚠️ 검증기의 현재 설정이 왜 무효인가
+### ⚠️ 왜 HT 를 끄고 `2-23` 으로 잡는가 (해소된 사례)
 
-점검 시점(2026-08-01) 실측:
+아래는 **2026-08-01 시점의 잘못된 설정**이다. 2026-08-25 에 HT off +
+`isolcpus=2-23` 로 바로잡았고, 같은 함정을 반복하지 않기 위해 근거를 남겨 둔다.
 
 ```
-현재 cmdline: isolcpus=0-23 nohz_full=0-23 rcu_nocbs=0-23
+당시 cmdline: isolcpus=0-23 nohz_full=0-23 rcu_nocbs=0-23
 HT 매핑:      core0→(0,24)  core1→(1,25)  …  core23→(23,47)
 ```
 
