@@ -2,6 +2,7 @@
 
 #include "ipc_server.h"
 #include "stats.h"
+#include "tx_engine.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -265,6 +266,16 @@ static int send_telemetry(int fd)
     snap.ports         = ps_ptr;
     snap.event_drop    = total.event_drop;
     snap.active_lcores = (uint32_t)g_cfg.n_lcores;
+    snap.tx_drop       = total.tx_drop;
+
+    /* 포트 카운터만으로는 "누가 시켜서 나가는 트래픽인지" 알 수 없다.
+     * 데이터플레인이 스스로 무엇을 하고 있다고 생각하는지를 올려야
+     * 제어부가 명령한 것과 대조할 수 있다. */
+    mir_tx_status tx;
+    if (mir_tx_status_get(&tx)) {
+        snap.active_scenario = tx.scenario_id;
+        snap.tx_lcores       = tx.tx_lcores;
+    }
 
     size_t len = mir__v1__telemetry_snapshot__get_packed_size(&snap);
     return send_packed(fd, MIR__V1__MSG_TYPE__MSG_TYPE_TELEMETRY,
@@ -302,15 +313,43 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
     case MIR__V1__MSG_TYPE__MSG_TYPE_START_SCENARIO: {
         Mir__V1__StartScenarioRequest *req =
             mir__v1__start_scenario_request__unpack(NULL, len, payload);
-        if (req) {
-            LOG(INFO, "start 요청: id=%s pcap=%s rate=%llu",
-                req->scenario_id ? req->scenario_id : "",
-                req->pcap_path   ? req->pcap_path   : "",
-                (unsigned long long)req->rate_pps);
-            mir__v1__start_scenario_request__free_unpacked(req, NULL);
+        if (!req)
+            return send_ack(fd, 0, "start 요청을 해석하지 못했다");
+
+        LOG(INFO, "start 요청: id=%s rate=%llu duration=%us lcores=%u",
+            req->scenario_id ? req->scenario_id : "",
+            (unsigned long long)req->rate_pps,
+            req->duration_s, req->tx_lcores);
+
+        char terr[256] = {0};
+        int rc;
+
+        if (g_cfg.n_ports == 0 || !g_cfg.dev) {
+            snprintf(terr, sizeof(terr),
+                     "포트가 없다 — vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것");
+            rc = -1;
+        } else {
+            rc = mir_tx_start(req, &g_cfg.dev[0], g_cfg.lcores, g_cfg.n_lcores,
+                              terr, sizeof(terr));
         }
-        /* 송신 엔진은 Phase 1~4-1 범위다. 성공했다고 거짓으로 응답하지 않는다. */
-        return send_ack(fd, 0, "송신 엔진 미구현 (Phase 1~4-1)");
+        mir__v1__start_scenario_request__free_unpacked(req, NULL);
+
+        if (rc != 0) {
+            LOG(ERR, "start 실패: %s", terr);
+            return send_ack(fd, 0, terr);
+        }
+
+        mir_tx_status st;
+        char msg[256];
+        if (mir_tx_status_get(&st)) {
+            snprintf(msg, sizeof(msg),
+                     "시작됨: worker=%u frame=%uB 변형=%u 체크섬=%s",
+                     st.tx_lcores, st.frame_len, st.n_variants,
+                     st.offload ? "NIC" : "SW");
+        } else {
+            snprintf(msg, sizeof(msg), "시작됨");
+        }
+        return send_ack(fd, 1, msg);
     }
 
     case MIR__V1__MSG_TYPE__MSG_TYPE_STOP_SCENARIO: {
@@ -318,7 +357,15 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
             mir__v1__stop_scenario_request__unpack(NULL, len, payload);
         if (req)
             mir__v1__stop_scenario_request__free_unpacked(req, NULL);
-        return send_ack(fd, 0, "송신 엔진 미구현 (Phase 1~4-1)");
+
+        mir_tx_status st;
+        int was = mir_tx_status_get(&st);
+
+        char terr[256] = {0};
+        if (mir_tx_stop(terr, sizeof(terr)) != 0)
+            return send_ack(fd, 0, terr);
+
+        return send_ack(fd, 1, was ? "정지됨" : "실행 중인 시나리오가 없었다");
     }
 
     default:

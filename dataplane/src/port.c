@@ -21,8 +21,15 @@
  * 1024)과 burst 여유만 덮으면 충분하다. Phase 2 에서 큐를 lcore 수만큼 벌릴 때
  * 이 값은 큐 수에 비례해 다시 계산해야 한다.
  */
-#define NUM_MBUFS        8192
 #define MBUF_CACHE_SIZE  256
+
+/* 큐 수에 비례해 필요한 mbuf 수를 계산한다.
+ *
+ * TX 디스크립터에 걸려 있는 것 + worker 가 조립 중인 것 + RX 링 + 코어별
+ * 캐시를 덮어야 한다. 모자라면 alloc_bulk 가 실패하면서 **속도가 조용히
+ * 떨어진다** — 에러가 아니라 드롭으로 나타나 원인 찾기가 어렵다. */
+#define MBUFS_PER_TX_QUEUE 2048
+#define MBUFS_BASE         4096
 
 #define RX_DESC_DEFAULT  1024
 #define TX_DESC_DEFAULT  1024
@@ -42,10 +49,14 @@ static void seterr(char *err, size_t errlen, const char *fmt, ...)
     va_end(ap);
 }
 
-int mir_port_setup(uint16_t port_id, mir_port *out, char *err, size_t errlen)
+int mir_port_setup(uint16_t port_id, uint16_t n_tx_queues,
+                   mir_port *out, char *err, size_t errlen)
 {
     memset(out, 0, sizeof(*out));
     out->port_id = port_id;
+
+    if (n_tx_queues == 0)
+        n_tx_queues = 1;
 
     struct rte_eth_dev_info info;
     memset(&info, 0, sizeof(info));
@@ -63,10 +74,18 @@ int mir_port_setup(uint16_t port_id, mir_port *out, char *err, size_t errlen)
     out->socket_id = socket_id;
 
     /* ── mempool ──────────────────────────────────────────────── */
+    if (n_tx_queues > info.max_tx_queues) {
+        seterr(err, errlen, "TX 큐 %u개를 요청했으나 NIC 최대는 %u개다",
+               n_tx_queues, info.max_tx_queues);
+        return -1;
+    }
+
     char pool_name[RTE_MEMPOOL_NAMESIZE];
     snprintf(pool_name, sizeof(pool_name), "mir_mp_p%u", port_id);
 
-    out->pool = rte_pktmbuf_pool_create(pool_name, NUM_MBUFS, MBUF_CACHE_SIZE,
+    unsigned n_mbufs = MBUFS_BASE + (unsigned)n_tx_queues * MBUFS_PER_TX_QUEUE;
+
+    out->pool = rte_pktmbuf_pool_create(pool_name, n_mbufs, MBUF_CACHE_SIZE,
                                         0, RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
     if (!out->pool) {
         seterr(err, errlen, "mempool 생성 실패(%s): %s",
@@ -88,7 +107,23 @@ int mir_port_setup(uint16_t port_id, mir_port *out, char *err, size_t errlen)
     if (info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
         conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
-    rc = rte_eth_dev_configure(port_id, 1, 1, &conf);
+    /* 체크섬 오프로드.
+     *
+     * 소프트웨어로 계산해도 되지만, 가변 필드가 있으면 패킷마다 다시 계산해야
+     * 하고 그 비용이 64B 라인레이트의 코어 예산을 그대로 먹는다. NIC 이 해 주면
+     * 프레임을 미리 구워 두고 복사만 할 수 있다.
+     *
+     * 셋을 모두 광고할 때만 켠다 — 일부만 켜면 어느 계층이 채워졌는지
+     * 추적해야 해서 코드가 조건부로 갈라진다. */
+    const uint64_t cksum_caps = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+                                RTE_ETH_TX_OFFLOAD_TCP_CKSUM  |
+                                RTE_ETH_TX_OFFLOAD_UDP_CKSUM;
+    if ((info.tx_offload_capa & cksum_caps) == cksum_caps) {
+        conf.txmode.offloads |= cksum_caps;
+        out->tx_cksum_offload = 1;
+    }
+
+    rc = rte_eth_dev_configure(port_id, 1, n_tx_queues, &conf);
     if (rc != 0) {
         seterr(err, errlen, "dev_configure: %s", rte_strerror(-rc));
         goto fail;
@@ -116,11 +151,16 @@ int mir_port_setup(uint16_t port_id, mir_port *out, char *err, size_t errlen)
 
     struct rte_eth_txconf txconf = info.default_txconf;
     txconf.offloads = conf.txmode.offloads;
-    rc = rte_eth_tx_queue_setup(port_id, 0, nb_txd, (unsigned)socket_id, &txconf);
-    if (rc != 0) {
-        seterr(err, errlen, "tx_queue_setup: %s", rte_strerror(-rc));
-        goto fail;
+    for (uint16_t q = 0; q < n_tx_queues; q++) {
+        rc = rte_eth_tx_queue_setup(port_id, q, nb_txd, (unsigned)socket_id,
+                                    &txconf);
+        if (rc != 0) {
+            seterr(err, errlen, "tx_queue_setup(q=%u): %s", q, rte_strerror(-rc));
+            goto fail;
+        }
     }
+    out->n_tx_queues = n_tx_queues;
+    out->n_rx_queues = 1;
 
     rc = rte_eth_dev_start(port_id);
     if (rc != 0) {

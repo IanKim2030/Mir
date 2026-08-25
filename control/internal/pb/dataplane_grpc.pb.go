@@ -65,8 +65,8 @@ const (
 // ─────────────────────────────────────────────────────────────
 // hop ④ — 사이드카가 서버, 제어부가 클라이언트.
 //
-// 제어부는 headless Service 의 EndpointSlice 를 watch 해 N 개 사이드카에
-// 자동으로 연결/해제한다.
+// 제어부는 함대 설정(fleet.yaml)에 적힌 주소 집합에 자동으로 연결/해제한다.
+// 장비 경계를 넘으므로 이 hop 은 mTLS 로 보호된다 — control/internal/mtls.
 // ─────────────────────────────────────────────────────────────
 type DataPlaneClient interface {
 	Hello(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloResponse, error)
@@ -159,8 +159,8 @@ type DataPlane_StreamEventsClient = grpc.ServerStreamingClient[Event]
 // ─────────────────────────────────────────────────────────────
 // hop ④ — 사이드카가 서버, 제어부가 클라이언트.
 //
-// 제어부는 headless Service 의 EndpointSlice 를 watch 해 N 개 사이드카에
-// 자동으로 연결/해제한다.
+// 제어부는 함대 설정(fleet.yaml)에 적힌 주소 집합에 자동으로 연결/해제한다.
+// 장비 경계를 넘으므로 이 hop 은 mTLS 로 보호된다 — control/internal/mtls.
 // ─────────────────────────────────────────────────────────────
 type DataPlaneServer interface {
 	Hello(context.Context, *HelloRequest) (*HelloResponse, error)

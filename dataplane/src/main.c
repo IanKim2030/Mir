@@ -47,6 +47,7 @@
 #include "ipc_server.h"
 #include "port.h"
 #include "stats.h"
+#include "tx_engine.h"
 #include "tx_hello.h"
 
 #ifndef MIR_VERSION
@@ -302,13 +303,21 @@ int main(void)
     /* ── 4. 포트 구성·start ───────────────────────────────────── */
     static mir_port dev[MIR_MAX_PORTS];
 
+    /* TX 큐는 worker lcore 수만큼 만든다 — worker 하나가 큐 하나를 독점하는
+     * 것이 tx_engine 의 전제다. main lcore 는 제어 스레드 몫이라 뺀다.
+     *
+     * 큐를 시나리오 시작 시점에 늘릴 수는 없다. rte_eth_dev_configure 는
+     * 포트를 stop 한 상태에서만 되고, 그러면 링크가 내려갔다 올라온다. */
+    uint16_t n_tx_q = (uint16_t)(args.n_lcores > 1 ? args.n_lcores - 1 : 1);
+
     for (size_t i = 0; i < n_ports; i++) {
         char perr[256] = {0};
-        if (mir_port_setup(ports[i].port_id, &dev[i], perr, sizeof(perr)) != 0) {
+        if (mir_port_setup(ports[i].port_id, n_tx_q, &dev[i], perr, sizeof(perr)) != 0) {
             LOG(ERR, "port %u 구성 실패: %s", ports[i].port_id, perr);
             continue;
         }
         ports[i].started = 1;
+        LOG(INFO, "port %u: TX 큐 %u개 (worker lcore 수)", ports[i].port_id, n_tx_q);
         mir_port_wait_link(ports[i].port_id, LINK_WAIT_MS, NULL);
     }
 
@@ -333,6 +342,7 @@ int main(void)
         .lcores     = args.lcores,
         .n_lcores   = args.n_lcores,
         .main_lcore = rte_get_main_lcore(),
+        .dev        = dev,
     };
 
     if (ipc_server_start(&cfg) != 0) {
@@ -363,6 +373,11 @@ int main(void)
     /* 순서가 중요하다. 제어 스레드를 먼저 세워야 그 스레드가 텔레메트리를
      * 만들며 rte_eth_stats_get() 을 부르는 도중에 포트가 닫히는 일이 없다. */
     ipc_server_stop();
+
+    /* worker 가 아직 tx_burst 를 돌고 있는데 포트를 닫으면 그대로 깨진다.
+     * 반드시 포트보다 먼저 세운다. */
+    mir_tx_shutdown();
+
     for (size_t i = 0; i < n_ports; i++)
         mir_port_close(&dev[i]);
     rte_eal_cleanup();

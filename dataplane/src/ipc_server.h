@@ -20,6 +20,8 @@
 #ifndef MIR_IPC_SERVER_H
 #define MIR_IPC_SERVER_H
 
+#include "port.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,6 +56,10 @@ typedef struct {
     const unsigned      *lcores;
     size_t               n_lcores;
     unsigned             main_lcore;
+
+    /* 송신 엔진이 쓸 포트 핸들. ports[] 와 같은 순서다.
+     * 인스턴스당 PF 하나가 전제라 시나리오는 dev[0] 을 쓴다. */
+    const mir_port      *dev;
 } ipc_server_config;
 
 /* 0 = 성공. 백그라운드 스레드를 띄우고 즉시 반환한다. */

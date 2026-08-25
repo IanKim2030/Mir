@@ -10,7 +10,9 @@ package registry
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -263,4 +265,66 @@ func (p *peer) setConnected(v bool) {
 	p.mu.Lock()
 	p.connected = v
 	p.mu.Unlock()
+}
+
+// ───────────────────────────────────────────────────────────
+// 명령 — 시나리오 시작/정지
+//
+// 개별 패킷과 달리 이건 초당 수 건짜리 제어 평면이라 gRPC 왕복이 문제되지 않는다.
+// ───────────────────────────────────────────────────────────
+
+// ErrNotFound 는 이름에 해당하는 인스턴스가 연결 집합에 없을 때다.
+type ErrNotFound struct{ Name string }
+
+func (e *ErrNotFound) Error() string {
+	return fmt.Sprintf("인스턴스 %q 가 연결돼 있지 않다", e.Name)
+}
+
+func (r *Registry) peerByName(name string) (*peer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, p := range r.peers {
+		if p.name == name {
+			return p, nil
+		}
+	}
+	return nil, &ErrNotFound{Name: name}
+}
+
+// StartScenario 는 인스턴스 하나에 시작 명령을 보낸다.
+func (r *Registry) StartScenario(
+	ctx context.Context, name string, req *pb.StartScenarioRequest,
+) (*pb.Ack, error) {
+	p, err := r.peerByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return p.client.StartScenario(ctx, req)
+}
+
+// StopScenario 는 인스턴스 하나에 정지 명령을 보낸다.
+func (r *Registry) StopScenario(
+	ctx context.Context, name string, req *pb.StopScenarioRequest,
+) (*pb.Ack, error) {
+	p, err := r.peerByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return p.client.StopScenario(ctx, req)
+}
+
+// Names 는 현재 붙어 있는 인스턴스 이름을 돌려준다 (대상 미지정 시 전체 배포용).
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]string, 0, len(r.peers))
+	for _, p := range r.peers {
+		if p.name != "" {
+			out = append(out, p.name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

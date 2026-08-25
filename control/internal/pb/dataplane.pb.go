@@ -177,7 +177,7 @@ func (x Event_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Event_Kind.Descriptor instead.
 func (Event_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{8, 0}
+	return file_dataplane_proto_rawDescGZIP(), []int{14, 0}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -306,7 +306,7 @@ func (x *PortInfo) GetDeviceSpec() string {
 type HelloResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	DataplaneVersion string                 `protobuf:"bytes,1,opt,name=dataplane_version,json=dataplaneVersion,proto3" json:"dataplane_version,omitempty"`
-	NodeId           string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"` // 파드명 (HOSTNAME)
+	NodeId           string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"` // 인스턴스명 (HOSTNAME)
 	Ports            []*PortInfo            `protobuf:"bytes,3,rep,name=ports,proto3" json:"ports,omitempty"`
 	Lcores           []uint32               `protobuf:"varint,4,rep,packed,name=lcores,proto3" json:"lcores,omitempty"` // 실제로 할당받은 CPU 목록 (cpuset 에서 읽은 값)
 	MainLcore        uint32                 `protobuf:"varint,5,opt,name=main_lcore,json=mainLcore,proto3" json:"main_lcore,omitempty"`
@@ -380,6 +380,571 @@ func (x *HelloResponse) GetMainLcore() uint32 {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 패킷 명세 (모드 A — Stateless 고속 생성)
+//
+// 헤더를 구조체로 기술한다. PCAP 리플레이(모드 C)는 원본 바이트를 그대로
+// 재생하므로 이 경로를 쓰지 않는다 — 두 모드는 입력이 다르지 자매 관계가 아니다.
+//
+// **가변 필드.** 같은 패킷만 반복하면 상대의 RSS·플로우 테이블·세션 추적이
+// 전부 한 엔트리로 몰려 실제 부하와 동떨어진다. `*_count` 로 값을 N개 순환시켜
+// 플로우를 벌린다. 0 또는 1 이면 고정이다.
+// ─────────────────────────────────────────────────────────────
+type EthSpec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SrcMac        string                 `protobuf:"bytes,1,opt,name=src_mac,json=srcMac,proto3" json:"src_mac,omitempty"`  // 비우면 포트의 실제 MAC 을 쓴다
+	DstMac        string                 `protobuf:"bytes,2,opt,name=dst_mac,json=dstMac,proto3" json:"dst_mac,omitempty"`  // 필수
+	VlanId        uint32                 `protobuf:"varint,3,opt,name=vlan_id,json=vlanId,proto3" json:"vlan_id,omitempty"` // 0 = 태그 없음
+	VlanPcp       uint32                 `protobuf:"varint,4,opt,name=vlan_pcp,json=vlanPcp,proto3" json:"vlan_pcp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EthSpec) Reset() {
+	*x = EthSpec{}
+	mi := &file_dataplane_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EthSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EthSpec) ProtoMessage() {}
+
+func (x *EthSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EthSpec.ProtoReflect.Descriptor instead.
+func (*EthSpec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *EthSpec) GetSrcMac() string {
+	if x != nil {
+		return x.SrcMac
+	}
+	return ""
+}
+
+func (x *EthSpec) GetDstMac() string {
+	if x != nil {
+		return x.DstMac
+	}
+	return ""
+}
+
+func (x *EthSpec) GetVlanId() uint32 {
+	if x != nil {
+		return x.VlanId
+	}
+	return 0
+}
+
+func (x *EthSpec) GetVlanPcp() uint32 {
+	if x != nil {
+		return x.VlanPcp
+	}
+	return 0
+}
+
+type Ipv4Spec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Src   string                 `protobuf:"bytes,1,opt,name=src,proto3" json:"src,omitempty"`
+	Dst   string                 `protobuf:"bytes,2,opt,name=dst,proto3" json:"dst,omitempty"`
+	// src 부터 N개를 순환한다 (호스트 바이트 순서로 +1). 0/1 = 고정.
+	SrcCount      uint32 `protobuf:"varint,3,opt,name=src_count,json=srcCount,proto3" json:"src_count,omitempty"`
+	DstCount      uint32 `protobuf:"varint,4,opt,name=dst_count,json=dstCount,proto3" json:"dst_count,omitempty"`
+	Ttl           uint32 `protobuf:"varint,5,opt,name=ttl,proto3" json:"ttl,omitempty"` // 0 = 64
+	Dscp          uint32 `protobuf:"varint,6,opt,name=dscp,proto3" json:"dscp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ipv4Spec) Reset() {
+	*x = Ipv4Spec{}
+	mi := &file_dataplane_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ipv4Spec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ipv4Spec) ProtoMessage() {}
+
+func (x *Ipv4Spec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ipv4Spec.ProtoReflect.Descriptor instead.
+func (*Ipv4Spec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Ipv4Spec) GetSrc() string {
+	if x != nil {
+		return x.Src
+	}
+	return ""
+}
+
+func (x *Ipv4Spec) GetDst() string {
+	if x != nil {
+		return x.Dst
+	}
+	return ""
+}
+
+func (x *Ipv4Spec) GetSrcCount() uint32 {
+	if x != nil {
+		return x.SrcCount
+	}
+	return 0
+}
+
+func (x *Ipv4Spec) GetDstCount() uint32 {
+	if x != nil {
+		return x.DstCount
+	}
+	return 0
+}
+
+func (x *Ipv4Spec) GetTtl() uint32 {
+	if x != nil {
+		return x.Ttl
+	}
+	return 0
+}
+
+func (x *Ipv4Spec) GetDscp() uint32 {
+	if x != nil {
+		return x.Dscp
+	}
+	return 0
+}
+
+// Phase 2 에서는 **거부한다.** 스키마를 지금 잡아 두는 이유는 나중에 oneof 에
+// 끼워 넣으면 두 hop 의 생성 코드를 다시 만들어야 하기 때문이다.
+type Ipv6Spec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Src           string                 `protobuf:"bytes,1,opt,name=src,proto3" json:"src,omitempty"`
+	Dst           string                 `protobuf:"bytes,2,opt,name=dst,proto3" json:"dst,omitempty"`
+	SrcCount      uint32                 `protobuf:"varint,3,opt,name=src_count,json=srcCount,proto3" json:"src_count,omitempty"`
+	DstCount      uint32                 `protobuf:"varint,4,opt,name=dst_count,json=dstCount,proto3" json:"dst_count,omitempty"`
+	HopLimit      uint32                 `protobuf:"varint,5,opt,name=hop_limit,json=hopLimit,proto3" json:"hop_limit,omitempty"`
+	TrafficClass  uint32                 `protobuf:"varint,6,opt,name=traffic_class,json=trafficClass,proto3" json:"traffic_class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ipv6Spec) Reset() {
+	*x = Ipv6Spec{}
+	mi := &file_dataplane_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ipv6Spec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ipv6Spec) ProtoMessage() {}
+
+func (x *Ipv6Spec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ipv6Spec.ProtoReflect.Descriptor instead.
+func (*Ipv6Spec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *Ipv6Spec) GetSrc() string {
+	if x != nil {
+		return x.Src
+	}
+	return ""
+}
+
+func (x *Ipv6Spec) GetDst() string {
+	if x != nil {
+		return x.Dst
+	}
+	return ""
+}
+
+func (x *Ipv6Spec) GetSrcCount() uint32 {
+	if x != nil {
+		return x.SrcCount
+	}
+	return 0
+}
+
+func (x *Ipv6Spec) GetDstCount() uint32 {
+	if x != nil {
+		return x.DstCount
+	}
+	return 0
+}
+
+func (x *Ipv6Spec) GetHopLimit() uint32 {
+	if x != nil {
+		return x.HopLimit
+	}
+	return 0
+}
+
+func (x *Ipv6Spec) GetTrafficClass() uint32 {
+	if x != nil {
+		return x.TrafficClass
+	}
+	return 0
+}
+
+type TcpSpec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SrcPort       uint32                 `protobuf:"varint,1,opt,name=src_port,json=srcPort,proto3" json:"src_port,omitempty"`
+	DstPort       uint32                 `protobuf:"varint,2,opt,name=dst_port,json=dstPort,proto3" json:"dst_port,omitempty"`
+	SrcPortCount  uint32                 `protobuf:"varint,3,opt,name=src_port_count,json=srcPortCount,proto3" json:"src_port_count,omitempty"`
+	DstPortCount  uint32                 `protobuf:"varint,4,opt,name=dst_port_count,json=dstPortCount,proto3" json:"dst_port_count,omitempty"`
+	Flags         uint32                 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`   // RTE_TCP_*_FLAG 비트합. 0 = SYN
+	Window        uint32                 `protobuf:"varint,6,opt,name=window,proto3" json:"window,omitempty"` // 0 = 65535
+	Seq           uint32                 `protobuf:"varint,7,opt,name=seq,proto3" json:"seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TcpSpec) Reset() {
+	*x = TcpSpec{}
+	mi := &file_dataplane_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TcpSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TcpSpec) ProtoMessage() {}
+
+func (x *TcpSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TcpSpec.ProtoReflect.Descriptor instead.
+func (*TcpSpec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TcpSpec) GetSrcPort() uint32 {
+	if x != nil {
+		return x.SrcPort
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetDstPort() uint32 {
+	if x != nil {
+		return x.DstPort
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetSrcPortCount() uint32 {
+	if x != nil {
+		return x.SrcPortCount
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetDstPortCount() uint32 {
+	if x != nil {
+		return x.DstPortCount
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetWindow() uint32 {
+	if x != nil {
+		return x.Window
+	}
+	return 0
+}
+
+func (x *TcpSpec) GetSeq() uint32 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+type UdpSpec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SrcPort       uint32                 `protobuf:"varint,1,opt,name=src_port,json=srcPort,proto3" json:"src_port,omitempty"`
+	DstPort       uint32                 `protobuf:"varint,2,opt,name=dst_port,json=dstPort,proto3" json:"dst_port,omitempty"`
+	SrcPortCount  uint32                 `protobuf:"varint,3,opt,name=src_port_count,json=srcPortCount,proto3" json:"src_port_count,omitempty"`
+	DstPortCount  uint32                 `protobuf:"varint,4,opt,name=dst_port_count,json=dstPortCount,proto3" json:"dst_port_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UdpSpec) Reset() {
+	*x = UdpSpec{}
+	mi := &file_dataplane_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UdpSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UdpSpec) ProtoMessage() {}
+
+func (x *UdpSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UdpSpec.ProtoReflect.Descriptor instead.
+func (*UdpSpec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *UdpSpec) GetSrcPort() uint32 {
+	if x != nil {
+		return x.SrcPort
+	}
+	return 0
+}
+
+func (x *UdpSpec) GetDstPort() uint32 {
+	if x != nil {
+		return x.DstPort
+	}
+	return 0
+}
+
+func (x *UdpSpec) GetSrcPortCount() uint32 {
+	if x != nil {
+		return x.SrcPortCount
+	}
+	return 0
+}
+
+func (x *UdpSpec) GetDstPortCount() uint32 {
+	if x != nil {
+		return x.DstPortCount
+	}
+	return 0
+}
+
+type PacketSpec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Eth   *EthSpec               `protobuf:"bytes,1,opt,name=eth,proto3" json:"eth,omitempty"`
+	// Types that are valid to be assigned to L3:
+	//
+	//	*PacketSpec_Ipv4
+	//	*PacketSpec_Ipv6
+	L3 isPacketSpec_L3 `protobuf_oneof:"l3"`
+	// Types that are valid to be assigned to L4:
+	//
+	//	*PacketSpec_Tcp
+	//	*PacketSpec_Udp
+	L4 isPacketSpec_L4 `protobuf_oneof:"l4"`
+	// CRC 를 제외한 전체 프레임 길이. 0 이면 헤더 합.
+	// 이더넷 최소 프레임 규정 때문에 64 미만은 64 로 올린다 — 그보다 작은
+	// 프레임은 선로에 존재할 수 없다.
+	FrameSize uint32 `protobuf:"varint,6,opt,name=frame_size,json=frameSize,proto3" json:"frame_size,omitempty"`
+	// 비우면 남는 자리를 패턴으로 채운다. 지정하면 그대로 싣되 frame_size 를 넘지 않는다.
+	Payload       []byte `protobuf:"bytes,7,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PacketSpec) Reset() {
+	*x = PacketSpec{}
+	mi := &file_dataplane_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PacketSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PacketSpec) ProtoMessage() {}
+
+func (x *PacketSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PacketSpec.ProtoReflect.Descriptor instead.
+func (*PacketSpec) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PacketSpec) GetEth() *EthSpec {
+	if x != nil {
+		return x.Eth
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetL3() isPacketSpec_L3 {
+	if x != nil {
+		return x.L3
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetIpv4() *Ipv4Spec {
+	if x != nil {
+		if x, ok := x.L3.(*PacketSpec_Ipv4); ok {
+			return x.Ipv4
+		}
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetIpv6() *Ipv6Spec {
+	if x != nil {
+		if x, ok := x.L3.(*PacketSpec_Ipv6); ok {
+			return x.Ipv6
+		}
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetL4() isPacketSpec_L4 {
+	if x != nil {
+		return x.L4
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetTcp() *TcpSpec {
+	if x != nil {
+		if x, ok := x.L4.(*PacketSpec_Tcp); ok {
+			return x.Tcp
+		}
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetUdp() *UdpSpec {
+	if x != nil {
+		if x, ok := x.L4.(*PacketSpec_Udp); ok {
+			return x.Udp
+		}
+	}
+	return nil
+}
+
+func (x *PacketSpec) GetFrameSize() uint32 {
+	if x != nil {
+		return x.FrameSize
+	}
+	return 0
+}
+
+func (x *PacketSpec) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type isPacketSpec_L3 interface {
+	isPacketSpec_L3()
+}
+
+type PacketSpec_Ipv4 struct {
+	Ipv4 *Ipv4Spec `protobuf:"bytes,2,opt,name=ipv4,proto3,oneof"`
+}
+
+type PacketSpec_Ipv6 struct {
+	Ipv6 *Ipv6Spec `protobuf:"bytes,3,opt,name=ipv6,proto3,oneof"`
+}
+
+func (*PacketSpec_Ipv4) isPacketSpec_L3() {}
+
+func (*PacketSpec_Ipv6) isPacketSpec_L3() {}
+
+type isPacketSpec_L4 interface {
+	isPacketSpec_L4()
+}
+
+type PacketSpec_Tcp struct {
+	Tcp *TcpSpec `protobuf:"bytes,4,opt,name=tcp,proto3,oneof"`
+}
+
+type PacketSpec_Udp struct {
+	Udp *UdpSpec `protobuf:"bytes,5,opt,name=udp,proto3,oneof"`
+}
+
+func (*PacketSpec_Tcp) isPacketSpec_L4() {}
+
+func (*PacketSpec_Udp) isPacketSpec_L4() {}
+
+// ─────────────────────────────────────────────────────────────
 // 명령
 // ─────────────────────────────────────────────────────────────
 type StartScenarioRequest struct {
@@ -387,7 +952,7 @@ type StartScenarioRequest struct {
 	ScenarioId string                 `protobuf:"bytes,1,opt,name=scenario_id,json=scenarioId,proto3" json:"scenario_id,omitempty"`
 	// 리플레이 대상 PCAP. **파일 내용이 아니라 경로만** 전달한다.
 	// GB 단위일 수 있으므로 제어 채널로 실어 보내지 않고 공유 볼륨을 경유한다.
-	// 제어부가 RW 로, 데이터플레인이 RO 로 같은 PV 를 마운트한다.
+	// 제어부가 RW 로, 데이터플레인이 RO 로 같은 볼륨을 마운트한다.
 	PcapPath  string `protobuf:"bytes,2,opt,name=pcap_path,json=pcapPath,proto3" json:"pcap_path,omitempty"`
 	RatePps   uint64 `protobuf:"varint,3,opt,name=rate_pps,json=ratePps,proto3" json:"rate_pps,omitempty"`       // 0 = 최대 속도
 	DurationS uint32 `protobuf:"varint,4,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"` // 0 = 무한
@@ -400,17 +965,23 @@ type StartScenarioRequest struct {
 	// ★ 이 값은 **장비 간 시계가 동기화돼 있을 때만** 의미가 있다. PTP 가
 	//
 	//	전제이고, 텔레메트리의 ts_ns 도 같은 시계를 쓴다 → deploy/host/60-ptp.md
+	StartAtNs uint64 `protobuf:"varint,5,opt,name=start_at_ns,json=startAtNs,proto3" json:"start_at_ns,omitempty"`
+	// 모드 A — 생성할 패킷의 명세. pcap_path 와 **배타**다.
+	// 둘 다 비면 거부한다(무엇을 보낼지 알 수 없다).
+	Packet *PacketSpec `protobuf:"bytes,6,opt,name=packet,proto3" json:"packet,omitempty"`
+	// 송신에 쓸 worker lcore 수. 0 = 가용한 전부.
 	//
-	// 송신 엔진 자체는 Phase 2 다. 필드를 지금 잡아 두는 이유는 나중에 넣으면
-	// 두 hop(C ⇄ 사이드카 ⇄ 제어부)의 스키마를 다시 건드려야 하기 때문이다.
-	StartAtNs     uint64 `protobuf:"varint,5,opt,name=start_at_ns,json=startAtNs,proto3" json:"start_at_ns,omitempty"`
+	// 라인레이트에 필요한 코어 수는 프레임 크기와 NIC 에 따라 크게 달라져서
+	// 실측 없이는 정할 수 없다. 이 값을 낮춰 가며 재는 것이 Phase 7 튜닝의
+	// 출발점이므로 명령 단위로 조절할 수 있어야 한다.
+	TxLcores      uint32 `protobuf:"varint,7,opt,name=tx_lcores,json=txLcores,proto3" json:"tx_lcores,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StartScenarioRequest) Reset() {
 	*x = StartScenarioRequest{}
-	mi := &file_dataplane_proto_msgTypes[3]
+	mi := &file_dataplane_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -422,7 +993,7 @@ func (x *StartScenarioRequest) String() string {
 func (*StartScenarioRequest) ProtoMessage() {}
 
 func (x *StartScenarioRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[3]
+	mi := &file_dataplane_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -435,7 +1006,7 @@ func (x *StartScenarioRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartScenarioRequest.ProtoReflect.Descriptor instead.
 func (*StartScenarioRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StartScenarioRequest) GetScenarioId() string {
@@ -473,6 +1044,20 @@ func (x *StartScenarioRequest) GetStartAtNs() uint64 {
 	return 0
 }
 
+func (x *StartScenarioRequest) GetPacket() *PacketSpec {
+	if x != nil {
+		return x.Packet
+	}
+	return nil
+}
+
+func (x *StartScenarioRequest) GetTxLcores() uint32 {
+	if x != nil {
+		return x.TxLcores
+	}
+	return 0
+}
+
 type StopScenarioRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ScenarioId    string                 `protobuf:"bytes,1,opt,name=scenario_id,json=scenarioId,proto3" json:"scenario_id,omitempty"`
@@ -482,7 +1067,7 @@ type StopScenarioRequest struct {
 
 func (x *StopScenarioRequest) Reset() {
 	*x = StopScenarioRequest{}
-	mi := &file_dataplane_proto_msgTypes[4]
+	mi := &file_dataplane_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -494,7 +1079,7 @@ func (x *StopScenarioRequest) String() string {
 func (*StopScenarioRequest) ProtoMessage() {}
 
 func (x *StopScenarioRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[4]
+	mi := &file_dataplane_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -507,7 +1092,7 @@ func (x *StopScenarioRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopScenarioRequest.ProtoReflect.Descriptor instead.
 func (*StopScenarioRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *StopScenarioRequest) GetScenarioId() string {
@@ -527,7 +1112,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_dataplane_proto_msgTypes[5]
+	mi := &file_dataplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -539,7 +1124,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[5]
+	mi := &file_dataplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -552,7 +1137,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{5}
+	return file_dataplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Ack) GetOk() bool {
@@ -593,7 +1178,7 @@ type PortStats struct {
 
 func (x *PortStats) Reset() {
 	*x = PortStats{}
-	mi := &file_dataplane_proto_msgTypes[6]
+	mi := &file_dataplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -605,7 +1190,7 @@ func (x *PortStats) String() string {
 func (*PortStats) ProtoMessage() {}
 
 func (x *PortStats) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[6]
+	mi := &file_dataplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -618,7 +1203,7 @@ func (x *PortStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortStats.ProtoReflect.Descriptor instead.
 func (*PortStats) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{6}
+	return file_dataplane_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PortStats) GetPortId() uint32 {
@@ -691,15 +1276,25 @@ type TelemetrySnapshot struct {
 	Ports  []*PortStats           `protobuf:"bytes,3,rep,name=ports,proto3" json:"ports,omitempty"`
 	// 이벤트 ring 이 가득 차 버려진 개수.
 	// 이 값이 늘면 제어부가 이벤트를 충분히 빨리 소비하지 못하고 있다는 뜻이다.
-	EventDrop     uint64 `protobuf:"varint,4,opt,name=event_drop,json=eventDrop,proto3" json:"event_drop,omitempty"`
-	ActiveLcores  uint32 `protobuf:"varint,5,opt,name=active_lcores,json=activeLcores,proto3" json:"active_lcores,omitempty"`
+	EventDrop    uint64 `protobuf:"varint,4,opt,name=event_drop,json=eventDrop,proto3" json:"event_drop,omitempty"`
+	ActiveLcores uint32 `protobuf:"varint,5,opt,name=active_lcores,json=activeLcores,proto3" json:"active_lcores,omitempty"`
+	// 진행 중인 시나리오. 비어 있으면 유휴다.
+	//
+	// 포트 카운터만으로는 "누가 시켜서 나가는 트래픽인지" 알 수 없다. 제어부가
+	// 명령한 것과 실제로 도는 것을 대조하려면 데이터플레인이 스스로 무엇을 하고
+	// 있다고 생각하는지를 올려야 한다.
+	ActiveScenario string `protobuf:"bytes,6,opt,name=active_scenario,json=activeScenario,proto3" json:"active_scenario,omitempty"`
+	TxLcores       uint32 `protobuf:"varint,7,opt,name=tx_lcores,json=txLcores,proto3" json:"tx_lcores,omitempty"` // 그 시나리오가 실제로 쓰는 worker 수
+	// worker 가 tx_burst 에 넣지 못해 버린 패킷 누계.
+	// 이 값이 늘면 NIC 이 요구 속도를 못 따라가고 있다는 뜻이다.
+	TxDrop        uint64 `protobuf:"varint,8,opt,name=tx_drop,json=txDrop,proto3" json:"tx_drop,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TelemetrySnapshot) Reset() {
 	*x = TelemetrySnapshot{}
-	mi := &file_dataplane_proto_msgTypes[7]
+	mi := &file_dataplane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -711,7 +1306,7 @@ func (x *TelemetrySnapshot) String() string {
 func (*TelemetrySnapshot) ProtoMessage() {}
 
 func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[7]
+	mi := &file_dataplane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -724,7 +1319,7 @@ func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetrySnapshot.ProtoReflect.Descriptor instead.
 func (*TelemetrySnapshot) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{7}
+	return file_dataplane_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TelemetrySnapshot) GetTsNs() uint64 {
@@ -762,6 +1357,27 @@ func (x *TelemetrySnapshot) GetActiveLcores() uint32 {
 	return 0
 }
 
+func (x *TelemetrySnapshot) GetActiveScenario() string {
+	if x != nil {
+		return x.ActiveScenario
+	}
+	return ""
+}
+
+func (x *TelemetrySnapshot) GetTxLcores() uint32 {
+	if x != nil {
+		return x.TxLcores
+	}
+	return 0
+}
+
+func (x *TelemetrySnapshot) GetTxDrop() uint64 {
+	if x != nil {
+		return x.TxDrop
+	}
+	return 0
+}
+
 // ─────────────────────────────────────────────────────────────
 // 판정 이벤트 — C 가 µs 단위로 내린 실시간 판정 결과의 요약.
 // 세션 단위 집계·룰 판정은 제어부가 이 이벤트들을 모아 수행한다.
@@ -780,7 +1396,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_dataplane_proto_msgTypes[8]
+	mi := &file_dataplane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -792,7 +1408,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[8]
+	mi := &file_dataplane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -805,7 +1421,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{8}
+	return file_dataplane_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Event) GetTsNs() uint64 {
@@ -858,7 +1474,7 @@ type StreamTelemetryRequest struct {
 
 func (x *StreamTelemetryRequest) Reset() {
 	*x = StreamTelemetryRequest{}
-	mi := &file_dataplane_proto_msgTypes[9]
+	mi := &file_dataplane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -870,7 +1486,7 @@ func (x *StreamTelemetryRequest) String() string {
 func (*StreamTelemetryRequest) ProtoMessage() {}
 
 func (x *StreamTelemetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[9]
+	mi := &file_dataplane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -883,7 +1499,7 @@ func (x *StreamTelemetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamTelemetryRequest.ProtoReflect.Descriptor instead.
 func (*StreamTelemetryRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{9}
+	return file_dataplane_proto_rawDescGZIP(), []int{15}
 }
 
 type StreamEventsRequest struct {
@@ -894,7 +1510,7 @@ type StreamEventsRequest struct {
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_dataplane_proto_msgTypes[10]
+	mi := &file_dataplane_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -906,7 +1522,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[10]
+	mi := &file_dataplane_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -919,7 +1535,7 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_proto_rawDescGZIP(), []int{16}
 }
 
 var File_dataplane_proto protoreflect.FileDescriptor
@@ -942,7 +1558,51 @@ const file_dataplane_proto_rawDesc = "" +
 	"\x05ports\x18\x03 \x03(\v2\x10.mir.v1.PortInfoR\x05ports\x12\x16\n" +
 	"\x06lcores\x18\x04 \x03(\rR\x06lcores\x12\x1d\n" +
 	"\n" +
-	"main_lcore\x18\x05 \x01(\rR\tmainLcore\"\xae\x01\n" +
+	"main_lcore\x18\x05 \x01(\rR\tmainLcore\"o\n" +
+	"\aEthSpec\x12\x17\n" +
+	"\asrc_mac\x18\x01 \x01(\tR\x06srcMac\x12\x17\n" +
+	"\adst_mac\x18\x02 \x01(\tR\x06dstMac\x12\x17\n" +
+	"\avlan_id\x18\x03 \x01(\rR\x06vlanId\x12\x19\n" +
+	"\bvlan_pcp\x18\x04 \x01(\rR\avlanPcp\"\x8e\x01\n" +
+	"\bIpv4Spec\x12\x10\n" +
+	"\x03src\x18\x01 \x01(\tR\x03src\x12\x10\n" +
+	"\x03dst\x18\x02 \x01(\tR\x03dst\x12\x1b\n" +
+	"\tsrc_count\x18\x03 \x01(\rR\bsrcCount\x12\x1b\n" +
+	"\tdst_count\x18\x04 \x01(\rR\bdstCount\x12\x10\n" +
+	"\x03ttl\x18\x05 \x01(\rR\x03ttl\x12\x12\n" +
+	"\x04dscp\x18\x06 \x01(\rR\x04dscp\"\xaa\x01\n" +
+	"\bIpv6Spec\x12\x10\n" +
+	"\x03src\x18\x01 \x01(\tR\x03src\x12\x10\n" +
+	"\x03dst\x18\x02 \x01(\tR\x03dst\x12\x1b\n" +
+	"\tsrc_count\x18\x03 \x01(\rR\bsrcCount\x12\x1b\n" +
+	"\tdst_count\x18\x04 \x01(\rR\bdstCount\x12\x1b\n" +
+	"\thop_limit\x18\x05 \x01(\rR\bhopLimit\x12#\n" +
+	"\rtraffic_class\x18\x06 \x01(\rR\ftrafficClass\"\xcb\x01\n" +
+	"\aTcpSpec\x12\x19\n" +
+	"\bsrc_port\x18\x01 \x01(\rR\asrcPort\x12\x19\n" +
+	"\bdst_port\x18\x02 \x01(\rR\adstPort\x12$\n" +
+	"\x0esrc_port_count\x18\x03 \x01(\rR\fsrcPortCount\x12$\n" +
+	"\x0edst_port_count\x18\x04 \x01(\rR\fdstPortCount\x12\x14\n" +
+	"\x05flags\x18\x05 \x01(\rR\x05flags\x12\x16\n" +
+	"\x06window\x18\x06 \x01(\rR\x06window\x12\x10\n" +
+	"\x03seq\x18\a \x01(\rR\x03seq\"\x8b\x01\n" +
+	"\aUdpSpec\x12\x19\n" +
+	"\bsrc_port\x18\x01 \x01(\rR\asrcPort\x12\x19\n" +
+	"\bdst_port\x18\x02 \x01(\rR\adstPort\x12$\n" +
+	"\x0esrc_port_count\x18\x03 \x01(\rR\fsrcPortCount\x12$\n" +
+	"\x0edst_port_count\x18\x04 \x01(\rR\fdstPortCount\"\x8e\x02\n" +
+	"\n" +
+	"PacketSpec\x12!\n" +
+	"\x03eth\x18\x01 \x01(\v2\x0f.mir.v1.EthSpecR\x03eth\x12&\n" +
+	"\x04ipv4\x18\x02 \x01(\v2\x10.mir.v1.Ipv4SpecH\x00R\x04ipv4\x12&\n" +
+	"\x04ipv6\x18\x03 \x01(\v2\x10.mir.v1.Ipv6SpecH\x00R\x04ipv6\x12#\n" +
+	"\x03tcp\x18\x04 \x01(\v2\x0f.mir.v1.TcpSpecH\x01R\x03tcp\x12#\n" +
+	"\x03udp\x18\x05 \x01(\v2\x0f.mir.v1.UdpSpecH\x01R\x03udp\x12\x1d\n" +
+	"\n" +
+	"frame_size\x18\x06 \x01(\rR\tframeSize\x12\x18\n" +
+	"\apayload\x18\a \x01(\fR\apayloadB\x04\n" +
+	"\x02l3B\x04\n" +
+	"\x02l4\"\xf7\x01\n" +
 	"\x14StartScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\x12\x1b\n" +
@@ -950,7 +1610,9 @@ const file_dataplane_proto_rawDesc = "" +
 	"\brate_pps\x18\x03 \x01(\x04R\aratePps\x12\x1d\n" +
 	"\n" +
 	"duration_s\x18\x04 \x01(\rR\tdurationS\x12\x1e\n" +
-	"\vstart_at_ns\x18\x05 \x01(\x04R\tstartAtNs\"6\n" +
+	"\vstart_at_ns\x18\x05 \x01(\x04R\tstartAtNs\x12*\n" +
+	"\x06packet\x18\x06 \x01(\v2\x12.mir.v1.PacketSpecR\x06packet\x12\x1b\n" +
+	"\ttx_lcores\x18\a \x01(\rR\btxLcores\"6\n" +
 	"\x13StopScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\"/\n" +
@@ -966,14 +1628,17 @@ const file_dataplane_proto_rawDesc = "" +
 	"\arx_pkts\x18\x06 \x01(\x04R\x06rxPkts\x12\x19\n" +
 	"\brx_bytes\x18\a \x01(\x04R\arxBytes\x12\x17\n" +
 	"\arx_drop\x18\b \x01(\x04R\x06rxDrop\x12\x15\n" +
-	"\x06rx_err\x18\t \x01(\x04R\x05rxErr\"\xae\x01\n" +
+	"\x06rx_err\x18\t \x01(\x04R\x05rxErr\"\x8d\x02\n" +
 	"\x11TelemetrySnapshot\x12\x13\n" +
 	"\x05ts_ns\x18\x01 \x01(\x04R\x04tsNs\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12'\n" +
 	"\x05ports\x18\x03 \x03(\v2\x11.mir.v1.PortStatsR\x05ports\x12\x1d\n" +
 	"\n" +
 	"event_drop\x18\x04 \x01(\x04R\teventDrop\x12#\n" +
-	"\ractive_lcores\x18\x05 \x01(\rR\factiveLcores\"\xa4\x02\n" +
+	"\ractive_lcores\x18\x05 \x01(\rR\factiveLcores\x12'\n" +
+	"\x0factive_scenario\x18\x06 \x01(\tR\x0eactiveScenario\x12\x1b\n" +
+	"\ttx_lcores\x18\a \x01(\rR\btxLcores\x12\x17\n" +
+	"\atx_drop\x18\b \x01(\x04R\x06txDrop\"\xa4\x02\n" +
 	"\x05Event\x12\x13\n" +
 	"\x05ts_ns\x18\x01 \x01(\x04R\x04tsNs\x12&\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x12.mir.v1.Event.KindR\x04kind\x12\x17\n" +
@@ -1018,41 +1683,53 @@ func file_dataplane_proto_rawDescGZIP() []byte {
 }
 
 var file_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_dataplane_proto_goTypes = []any{
 	(MsgType)(0),                   // 0: mir.v1.MsgType
 	(Event_Kind)(0),                // 1: mir.v1.Event.Kind
 	(*HelloRequest)(nil),           // 2: mir.v1.HelloRequest
 	(*PortInfo)(nil),               // 3: mir.v1.PortInfo
 	(*HelloResponse)(nil),          // 4: mir.v1.HelloResponse
-	(*StartScenarioRequest)(nil),   // 5: mir.v1.StartScenarioRequest
-	(*StopScenarioRequest)(nil),    // 6: mir.v1.StopScenarioRequest
-	(*Ack)(nil),                    // 7: mir.v1.Ack
-	(*PortStats)(nil),              // 8: mir.v1.PortStats
-	(*TelemetrySnapshot)(nil),      // 9: mir.v1.TelemetrySnapshot
-	(*Event)(nil),                  // 10: mir.v1.Event
-	(*StreamTelemetryRequest)(nil), // 11: mir.v1.StreamTelemetryRequest
-	(*StreamEventsRequest)(nil),    // 12: mir.v1.StreamEventsRequest
+	(*EthSpec)(nil),                // 5: mir.v1.EthSpec
+	(*Ipv4Spec)(nil),               // 6: mir.v1.Ipv4Spec
+	(*Ipv6Spec)(nil),               // 7: mir.v1.Ipv6Spec
+	(*TcpSpec)(nil),                // 8: mir.v1.TcpSpec
+	(*UdpSpec)(nil),                // 9: mir.v1.UdpSpec
+	(*PacketSpec)(nil),             // 10: mir.v1.PacketSpec
+	(*StartScenarioRequest)(nil),   // 11: mir.v1.StartScenarioRequest
+	(*StopScenarioRequest)(nil),    // 12: mir.v1.StopScenarioRequest
+	(*Ack)(nil),                    // 13: mir.v1.Ack
+	(*PortStats)(nil),              // 14: mir.v1.PortStats
+	(*TelemetrySnapshot)(nil),      // 15: mir.v1.TelemetrySnapshot
+	(*Event)(nil),                  // 16: mir.v1.Event
+	(*StreamTelemetryRequest)(nil), // 17: mir.v1.StreamTelemetryRequest
+	(*StreamEventsRequest)(nil),    // 18: mir.v1.StreamEventsRequest
 }
 var file_dataplane_proto_depIdxs = []int32{
 	3,  // 0: mir.v1.HelloResponse.ports:type_name -> mir.v1.PortInfo
-	8,  // 1: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
-	1,  // 2: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
-	2,  // 3: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
-	5,  // 4: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
-	6,  // 5: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
-	11, // 6: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
-	12, // 7: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
-	4,  // 8: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
-	7,  // 9: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
-	7,  // 10: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
-	9,  // 11: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
-	10, // 12: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
-	8,  // [8:13] is the sub-list for method output_type
-	3,  // [3:8] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	5,  // 1: mir.v1.PacketSpec.eth:type_name -> mir.v1.EthSpec
+	6,  // 2: mir.v1.PacketSpec.ipv4:type_name -> mir.v1.Ipv4Spec
+	7,  // 3: mir.v1.PacketSpec.ipv6:type_name -> mir.v1.Ipv6Spec
+	8,  // 4: mir.v1.PacketSpec.tcp:type_name -> mir.v1.TcpSpec
+	9,  // 5: mir.v1.PacketSpec.udp:type_name -> mir.v1.UdpSpec
+	10, // 6: mir.v1.StartScenarioRequest.packet:type_name -> mir.v1.PacketSpec
+	14, // 7: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
+	1,  // 8: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
+	2,  // 9: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
+	11, // 10: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
+	12, // 11: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
+	17, // 12: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
+	18, // 13: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
+	4,  // 14: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
+	13, // 15: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
+	13, // 16: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
+	15, // 17: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
+	16, // 18: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
+	14, // [14:19] is the sub-list for method output_type
+	9,  // [9:14] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_dataplane_proto_init() }
@@ -1060,13 +1737,19 @@ func file_dataplane_proto_init() {
 	if File_dataplane_proto != nil {
 		return
 	}
+	file_dataplane_proto_msgTypes[8].OneofWrappers = []any{
+		(*PacketSpec_Ipv4)(nil),
+		(*PacketSpec_Ipv6)(nil),
+		(*PacketSpec_Tcp)(nil),
+		(*PacketSpec_Udp)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_proto_rawDesc), len(file_dataplane_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   11,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

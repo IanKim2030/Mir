@@ -49,6 +49,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/capacity", s.capacity)
 	mux.HandleFunc("GET /api/dataplanes", s.listDataplanes)
 
+	// 모드 A — L2~L4 생성 송신 (Phase 2)
+	mux.HandleFunc("POST /api/scenarios/start", s.startScenario)
+	mux.HandleFunc("POST /api/scenarios/stop", s.stopScenario)
+
 	return mux
 }
 
@@ -139,6 +143,11 @@ type instanceView struct {
 	MainLcore uint32     `json:"mainLcore,omitempty"`
 	DPVersion string     `json:"dataplaneVersion,omitempty"`
 	EventDrop uint64     `json:"eventDrop,omitempty"`
+
+	// 진행 중인 시나리오 (텔레메트리에서). 비어 있으면 유휴.
+	ActiveScenario string `json:"activeScenario,omitempty"`
+	TxLcores       uint32 `json:"txLcores,omitempty"`
+	TxDrop         uint64 `json:"txDrop,omitempty"`
 }
 
 type machineView struct {
@@ -227,6 +236,9 @@ func (s *Server) instanceViews() []instanceView {
 		v.Ports = toPortViews(st.Hello.Ports, st.Telemetry)
 		if st.Telemetry != nil {
 			v.EventDrop = st.Telemetry.EventDrop
+			v.ActiveScenario = st.Telemetry.ActiveScenario
+			v.TxLcores = st.Telemetry.TxLcores
+			v.TxDrop = st.Telemetry.TxDrop
 		}
 
 		switch {
@@ -304,6 +316,10 @@ func toPortViews(ports []*pb.PortInfo, snap *pb.TelemetrySnapshot) []portView {
 }
 
 // ───────────────────────────────────────────────────────────
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -80,6 +80,85 @@ message HelloResponse {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 패킷 명세 (모드 A — Stateless 고속 생성)
+//
+// 헤더를 구조체로 기술한다. PCAP 리플레이(모드 C)는 원본 바이트를 그대로
+// 재생하므로 이 경로를 쓰지 않는다 — 두 모드는 입력이 다르지 자매 관계가 아니다.
+//
+// **가변 필드.** 같은 패킷만 반복하면 상대의 RSS·플로우 테이블·세션 추적이
+// 전부 한 엔트리로 몰려 실제 부하와 동떨어진다. `*_count` 로 값을 N개 순환시켜
+// 플로우를 벌린다. 0 또는 1 이면 고정이다.
+// ─────────────────────────────────────────────────────────────
+message EthSpec {
+  string src_mac  = 1;  // 비우면 포트의 실제 MAC 을 쓴다
+  string dst_mac  = 2;  // 필수
+  uint32 vlan_id  = 3;  // 0 = 태그 없음
+  uint32 vlan_pcp = 4;
+}
+
+message Ipv4Spec {
+  string src = 1;
+  string dst = 2;
+
+  // src 부터 N개를 순환한다 (호스트 바이트 순서로 +1). 0/1 = 고정.
+  uint32 src_count = 3;
+  uint32 dst_count = 4;
+
+  uint32 ttl  = 5;  // 0 = 64
+  uint32 dscp = 6;
+}
+
+// Phase 2 에서는 **거부한다.** 스키마를 지금 잡아 두는 이유는 나중에 oneof 에
+// 끼워 넣으면 두 hop 의 생성 코드를 다시 만들어야 하기 때문이다.
+message Ipv6Spec {
+  string src        = 1;
+  string dst        = 2;
+  uint32 src_count  = 3;
+  uint32 dst_count  = 4;
+  uint32 hop_limit  = 5;
+  uint32 traffic_class = 6;
+}
+
+message TcpSpec {
+  uint32 src_port       = 1;
+  uint32 dst_port       = 2;
+  uint32 src_port_count = 3;
+  uint32 dst_port_count = 4;
+
+  uint32 flags  = 5;  // RTE_TCP_*_FLAG 비트합. 0 = SYN
+  uint32 window = 6;  // 0 = 65535
+  uint32 seq    = 7;
+}
+
+message UdpSpec {
+  uint32 src_port       = 1;
+  uint32 dst_port       = 2;
+  uint32 src_port_count = 3;
+  uint32 dst_port_count = 4;
+}
+
+message PacketSpec {
+  EthSpec eth = 1;
+
+  oneof l3 {
+    Ipv4Spec ipv4 = 2;
+    Ipv6Spec ipv6 = 3;
+  }
+  oneof l4 {
+    TcpSpec tcp = 4;
+    UdpSpec udp = 5;
+  }
+
+  // CRC 를 제외한 전체 프레임 길이. 0 이면 헤더 합.
+  // 이더넷 최소 프레임 규정 때문에 64 미만은 64 로 올린다 — 그보다 작은
+  // 프레임은 선로에 존재할 수 없다.
+  uint32 frame_size = 6;
+
+  // 비우면 남는 자리를 패턴으로 채운다. 지정하면 그대로 싣되 frame_size 를 넘지 않는다.
+  bytes payload = 7;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 명령
 // ─────────────────────────────────────────────────────────────
 message StartScenarioRequest {
@@ -102,9 +181,18 @@ message StartScenarioRequest {
   // ★ 이 값은 **장비 간 시계가 동기화돼 있을 때만** 의미가 있다. PTP 가
   //   전제이고, 텔레메트리의 ts_ns 도 같은 시계를 쓴다 → deploy/host/60-ptp.md
   //
-  // 송신 엔진 자체는 Phase 2 다. 필드를 지금 잡아 두는 이유는 나중에 넣으면
-  // 두 hop(C ⇄ 사이드카 ⇄ 제어부)의 스키마를 다시 건드려야 하기 때문이다.
   uint64 start_at_ns = 5;
+
+  // 모드 A — 생성할 패킷의 명세. pcap_path 와 **배타**다.
+  // 둘 다 비면 거부한다(무엇을 보낼지 알 수 없다).
+  PacketSpec packet = 6;
+
+  // 송신에 쓸 worker lcore 수. 0 = 가용한 전부.
+  //
+  // 라인레이트에 필요한 코어 수는 프레임 크기와 NIC 에 따라 크게 달라져서
+  // 실측 없이는 정할 수 없다. 이 값을 낮춰 가며 재는 것이 Phase 7 튜닝의
+  // 출발점이므로 명령 단위로 조절할 수 있어야 한다.
+  uint32 tx_lcores = 7;
 }
 
 message StopScenarioRequest {
@@ -146,6 +234,18 @@ message TelemetrySnapshot {
   uint64 event_drop = 4;
 
   uint32 active_lcores = 5;
+
+  // 진행 중인 시나리오. 비어 있으면 유휴다.
+  //
+  // 포트 카운터만으로는 "누가 시켜서 나가는 트래픽인지" 알 수 없다. 제어부가
+  // 명령한 것과 실제로 도는 것을 대조하려면 데이터플레인이 스스로 무엇을 하고
+  // 있다고 생각하는지를 올려야 한다.
+  string active_scenario = 6;
+  uint32 tx_lcores       = 7;  // 그 시나리오가 실제로 쓰는 worker 수
+
+  // worker 가 tx_burst 에 넣지 못해 버린 패킷 누계.
+  // 이 값이 늘면 NIC 이 요구 속도를 못 따라가고 있다는 뜻이다.
+  uint64 tx_drop = 8;
 }
 
 // ─────────────────────────────────────────────────────────────
