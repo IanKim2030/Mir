@@ -19,6 +19,7 @@
 #include <rte_udp.h>
 
 #include "events.h"
+#include "session.h"
 #include "stats.h"
 
 #define LOG(level, fmt, ...) \
@@ -179,13 +180,17 @@ static int rx_main(void *arg)
     LOG(INFO, "RX 폴링 시작 (port=%u, lcore=%u)", g.port_id, rte_lcore_id());
 
     while (likely(!g.stop)) {
-        uint16_t n = rte_eth_rx_burst(g.port_id, 0, bufs, RX_BURST);
-        if (n == 0)
-            continue;
-
         uint64_t ts = now_ns();
+
+        /* handshake 서비스는 패킷이 없어도 매 회차 돈다 — SYN 을 보내고
+         * timeout 을 검사해야 하기 때문이다. 유휴면 즉시 반환한다. */
+        mir_session_service(ts);
+
+        uint16_t n = rte_eth_rx_burst(g.port_id, 0, bufs, RX_BURST);
         for (uint16_t i = 0; i < n; i++) {
-            classify(bufs[i], st, g.port_id, ts);
+            /* 세션에 매칭되면 그쪽이 소비한다 — 일반 분류로 세지 않는다. */
+            if (!mir_session_handle(bufs[i], ts))
+                classify(bufs[i], st, g.port_id, ts);
             rte_pktmbuf_free(bufs[i]);
         }
     }

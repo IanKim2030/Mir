@@ -31,7 +31,9 @@ type startRequest struct {
 	TxLcores   uint32   `json:"txLcores"`
 	StartAtNs  uint64   `json:"startAtNs"`
 
-	Packet json.RawMessage `json:"packet"`
+	// packet(모드 A) 과 handshake(모드 B)는 배타. 정확히 하나여야 한다.
+	Packet    json.RawMessage `json:"packet"`
+	Handshake json.RawMessage `json:"handshake"`
 }
 
 type stopRequest struct {
@@ -83,23 +85,11 @@ func (s *Server) startScenario(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "scenarioId 가 필요하다")
 		return
 	}
-	if len(req.Packet) == 0 {
+	hasPacket := len(req.Packet) > 0
+	hasHandshake := len(req.Handshake) > 0
+	if hasPacket == hasHandshake {
 		writeError(w, http.StatusBadRequest,
-			"packet 명세가 필요하다 (PCAP 리플레이는 Phase 4-1)")
-		return
-	}
-
-	spec := &pb.PacketSpec{}
-	// DiscardUnknown 을 켜지 않는다 — 오타 난 필드가 조용히 무시되면
-	// "왜 내가 설정한 대로 안 나가지"를 추적할 수 없다.
-	if err := protojson.Unmarshal(req.Packet, spec); err != nil {
-		writeError(w, http.StatusBadRequest, "packet 명세 해석 실패: "+err.Error())
-		return
-	}
-
-	targets, err := s.resolveTargets(req.Targets)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+			"packet(모드 A) 또는 handshake(모드 B) 중 정확히 하나가 필요하다")
 		return
 	}
 
@@ -109,12 +99,35 @@ func (s *Server) startScenario(w http.ResponseWriter, r *http.Request) {
 		DurationS:  req.DurationS,
 		TxLcores:   req.TxLcores,
 		StartAtNs:  req.StartAtNs,
-		Packet:     spec,
+	}
+
+	// DiscardUnknown 을 켜지 않는다 — 오타 난 필드가 조용히 무시되면
+	// "왜 내가 설정한 대로 안 되지"를 추적할 수 없다.
+	if hasPacket {
+		spec := &pb.PacketSpec{}
+		if err := protojson.Unmarshal(req.Packet, spec); err != nil {
+			writeError(w, http.StatusBadRequest, "packet 명세 해석 실패: "+err.Error())
+			return
+		}
+		cmd.Packet = spec
+	} else {
+		spec := &pb.HandshakeSpec{}
+		if err := protojson.Unmarshal(req.Handshake, spec); err != nil {
+			writeError(w, http.StatusBadRequest, "handshake 명세 해석 실패: "+err.Error())
+			return
+		}
+		cmd.Handshake = spec
+	}
+
+	targets, err := s.resolveTargets(req.Targets)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	s.log.Info("시나리오 시작 요청",
-		"id", req.ScenarioID, "targets", targets,
-		"ratePps", req.RatePps, "durationS", req.DurationS)
+		"id", req.ScenarioID, "targets", targets, "mode",
+		map[bool]string{true: "A/packet", false: "B/handshake"}[hasPacket])
 
 	resp := scenarioResponse{ScenarioID: req.ScenarioID, OK: true}
 	for _, name := range targets {

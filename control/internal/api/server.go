@@ -154,6 +154,21 @@ type instanceView struct {
 
 	// 수신 분류 (Phase 3). handshake 응답을 집계한 것.
 	Rx *rxClass `json:"rx,omitempty"`
+
+	// handshake 제어 집계 (Phase 4, 모드 B). 유휴면 nil.
+	Handshake *handshakeStats `json:"handshake,omitempty"`
+}
+
+type handshakeStats struct {
+	Sessions  uint32 `json:"sessions"`
+	Sent      uint32 `json:"sent"`
+	SynAck    uint32 `json:"synAck"`
+	Completed uint32 `json:"completed"`
+	Refused   uint32 `json:"refused"`
+	TimedOut  uint32 `json:"timedOut"`
+	RttMinUs  uint32 `json:"rttMinUs"`
+	RttAvgUs  uint32 `json:"rttAvgUs"`
+	RttMaxUs  uint32 `json:"rttMaxUs"`
 }
 
 type rxClass struct {
@@ -261,6 +276,13 @@ func (s *Server) instanceViews() []instanceView {
 					TCPSyn: rx.TcpSyn, TCPSynAck: rx.TcpSynAck,
 					TCPRst: rx.TcpRst, TCPFin: rx.TcpFin, TCPAck: rx.TcpAck,
 					TCPOther: rx.TcpOther, UDP: rx.Udp, NonIP: rx.NonIp,
+				}
+			}
+			if hs := st.Telemetry.Handshake; hs != nil {
+				v.Handshake = &handshakeStats{
+					Sessions: hs.Sessions, Sent: hs.Sent, SynAck: hs.Synack,
+					Completed: hs.Completed, Refused: hs.Refused, TimedOut: hs.TimedOut,
+					RttMinUs: hs.RttMinUs, RttAvgUs: hs.RttAvgUs, RttMaxUs: hs.RttMaxUs,
 				}
 			}
 		}

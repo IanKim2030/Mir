@@ -193,6 +193,45 @@ message StartScenarioRequest {
   // 실측 없이는 정할 수 없다. 이 값을 낮춰 가며 재는 것이 Phase 7 튜닝의
   // 출발점이므로 명령 단위로 조절할 수 있어야 한다.
   uint32 tx_lcores = 7;
+
+  // 모드 B — handshake 제어 (Phase 4). packet 과 **배타**다.
+  //
+  // Mode A(무상태 블라스트)와 근본적으로 다르다. 상태를 들고 SYN→SYN-ACK→행동
+  // 피드백 루프를 돌리므로 라인레이트가 아니라 **세션 수 제한**이다.
+  HandshakeSpec handshake = 8;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 모드 B — handshake 제어 명세 (Phase 4)
+//
+// N개의 TCP 3-way handshake 를 시도하고, SYN-ACK 를 받은 뒤 지정한 행동을
+// 한다. **비정상 handshake 를 만드는 것**이 목적이다 — ACK 를 일부러 생략해
+// 서버를 half-open 으로 남기거나, ACK 대신 RST 로 끊는다.
+//
+// src IP 는 하나여야 한다. 상대가 응답의 L2 목적지를 ARP 로 정하는데, 우리는
+// 커널 스택이 없어 ARP 에 답하지 않으므로, 상대 쪽에 우리 포트 MAC 으로 향하는
+// 정적 ARP(또는 라우팅)가 있어야 응답이 돌아온다. → docs/DEPLOYMENT.md
+// ─────────────────────────────────────────────────────────────
+message HandshakeSpec {
+  EthSpec eth      = 1;
+  string  src_ip   = 2;  // 우리 식별자 (상대가 여기로 응답)
+  string  dst_ip   = 3;
+  uint32  dst_port = 4;
+
+  // 동시에 시도할 세션 수. 세션마다 다른 src port 를 쓴다(base 부터 순차).
+  uint32 sessions      = 5;
+  uint32 src_port_base = 6;  // 0 = 40000
+
+  enum Action {
+    ACTION_UNSPECIFIED = 0;  // = COMPLETE (기본값)
+    ACTION_COMPLETE    = 1;  // ACK 전송 → 정상 3-way
+    ACTION_HALF_OPEN   = 2;  // ACK 생략 → 서버를 half-open 으로 남긴다
+    ACTION_RST         = 3;  // ACK 대신 RST → 급작 종료
+  }
+  Action on_synack = 7;
+
+  // SYN 을 보내고 이 시간 안에 SYN-ACK 가 없으면 timeout 으로 판정한다. 0 = 1000ms.
+  uint32 synack_timeout_ms = 8;
 }
 
 message StopScenarioRequest {
@@ -253,6 +292,23 @@ message TelemetrySnapshot {
   // SYN-ACK 를 돌려줘도 그걸 하나씩 올리는 건 성립하지 않는다. 그래서 판정은
   // 여기 카운터로 집계하고, 이벤트(Event)는 이상동작만 표본으로 올린다.
   RxClass rx = 9;
+
+  // handshake 제어 집계 (모드 B). 유휴면 비어 있다.
+  HandshakeStats handshake = 10;
+}
+
+// handshake 세션의 진행 집계. RTT 는 µs 단위.
+message HandshakeStats {
+  uint32 sessions   = 1;  // 총 세션 수
+  uint32 sent       = 2;  // SYN 을 보낸 수
+  uint32 synack     = 3;  // SYN-ACK 를 받은 수
+  uint32 completed  = 4;  // 지정 행동까지 끝낸 수
+  uint32 refused    = 5;  // SYN 에 RST 로 거부된 수
+  uint32 timed_out  = 6;  // SYN-ACK 무응답
+
+  uint32 rtt_min_us = 7;
+  uint32 rtt_avg_us = 8;
+  uint32 rtt_max_us = 9;
 }
 
 // TCP 플래그별 수신 분류. handshake 검증의 1차 지표다.
@@ -277,11 +333,13 @@ message RxClass {
 // ─────────────────────────────────────────────────────────────
 message Event {
   enum Kind {
-    KIND_UNSPECIFIED     = 0;
-    KIND_SYNACK_TIMEOUT  = 1;  // SYN 보냈으나 SYN-ACK 없음
-    KIND_RST_RECEIVED    = 2;  // 포트 닫힘 추정
-    KIND_UNEXPECTED_FLAG = 3;
-    KIND_RETRANSMIT      = 4;
+    KIND_UNSPECIFIED       = 0;
+    KIND_SYNACK_TIMEOUT    = 1;  // SYN 보냈으나 SYN-ACK 없음 (Phase 4)
+    KIND_RST_RECEIVED      = 2;  // 포트 닫힘 추정
+    KIND_UNEXPECTED_FLAG   = 3;
+    KIND_RETRANSMIT        = 4;
+    KIND_HANDSHAKE_DONE    = 5;  // 3-way 완료 (rtt_us 에 왕복시간)
+    KIND_HANDSHAKE_REFUSED = 6;  // SYN 에 RST 로 거부됨
   }
 
   uint64 ts_ns    = 1;

@@ -3,6 +3,7 @@
 #include "ipc_server.h"
 #include "stats.h"
 #include "events.h"
+#include "session.h"
 #include "tx_engine.h"
 
 #include <errno.h>
@@ -315,6 +316,23 @@ static int send_telemetry(int fd)
     rx.non_ip      = total.rx_non_ip;
     snap.rx        = &rx;
 
+    Mir__V1__HandshakeStats hs = MIR__V1__HANDSHAKE_STATS__INIT;
+    mir_session_stats ss;
+    mir_session_get_stats(&ss);
+    if (ss.active) {
+        hs.sessions   = ss.sessions;
+        hs.sent       = ss.sent;
+        hs.synack     = ss.synack;
+        hs.completed  = ss.completed;
+        hs.refused    = ss.refused;
+        hs.timed_out  = ss.timed_out;
+        hs.rtt_min_us = ss.rtt_count ? ss.rtt_min_us : 0;
+        hs.rtt_max_us = ss.rtt_max_us;
+        hs.rtt_avg_us = ss.rtt_count
+                            ? (uint32_t)(ss.rtt_sum_us / ss.rtt_count) : 0;
+        snap.handshake = &hs;
+    }
+
     /* 포트 카운터만으로는 "누가 시켜서 나가는 트래픽인지" 알 수 없다.
      * 데이터플레인이 스스로 무엇을 하고 있다고 생각하는지를 올려야
      * 제어부가 명령한 것과 대조할 수 있다. */
@@ -363,21 +381,42 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
         if (!req)
             return send_ack(fd, 0, "start 요청을 해석하지 못했다");
 
-        LOG(INFO, "start 요청: id=%s rate=%llu duration=%us lcores=%u",
-            req->scenario_id ? req->scenario_id : "",
-            (unsigned long long)req->rate_pps,
-            req->duration_s, req->tx_lcores);
-
         char terr[256] = {0};
-        int rc;
+        char msg[256]  = {0};
+        int  rc;
 
         if (g_cfg.n_ports == 0 || !g_cfg.dev) {
-            snprintf(terr, sizeof(terr),
-                     "포트가 없다 — vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것");
-            rc = -1;
+            mir__v1__start_scenario_request__free_unpacked(req, NULL);
+            return send_ack(fd, 0,
+                "포트가 없다 — vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것");
+        }
+
+        if (req->handshake) {
+            /* 모드 B — handshake 제어. RX lcore 가 실제 상태를 돌린다. */
+            LOG(INFO, "handshake 요청: id=%s dst=%s:%u sessions=%u action=%d",
+                req->scenario_id ? req->scenario_id : "",
+                req->handshake->dst_ip ? req->handshake->dst_ip : "?",
+                req->handshake->dst_port, req->handshake->sessions,
+                req->handshake->on_synack);
+            rc = mir_session_request_start(req->handshake, &g_cfg.dev[0],
+                                           g_cfg.sess_txq, terr, sizeof(terr));
+            if (rc == 0)
+                snprintf(msg, sizeof(msg), "handshake 시작됨: sessions=%u",
+                         req->handshake->sessions ? req->handshake->sessions : 1);
         } else {
+            /* 모드 A — 무상태 블라스트. */
+            LOG(INFO, "start 요청: id=%s rate=%llu duration=%us lcores=%u",
+                req->scenario_id ? req->scenario_id : "",
+                (unsigned long long)req->rate_pps,
+                req->duration_s, req->tx_lcores);
             rc = mir_tx_start(req, &g_cfg.dev[0], g_cfg.lcores, g_cfg.n_lcores,
                               terr, sizeof(terr));
+            mir_tx_status st;
+            if (rc == 0 && mir_tx_status_get(&st))
+                snprintf(msg, sizeof(msg),
+                         "시작됨: worker=%u frame=%uB 변형=%u 체크섬=%s",
+                         st.tx_lcores, st.frame_len, st.n_variants,
+                         st.offload ? "NIC" : "SW");
         }
         mir__v1__start_scenario_request__free_unpacked(req, NULL);
 
@@ -385,18 +424,7 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
             LOG(ERR, "start 실패: %s", terr);
             return send_ack(fd, 0, terr);
         }
-
-        mir_tx_status st;
-        char msg[256];
-        if (mir_tx_status_get(&st)) {
-            snprintf(msg, sizeof(msg),
-                     "시작됨: worker=%u frame=%uB 변형=%u 체크섬=%s",
-                     st.tx_lcores, st.frame_len, st.n_variants,
-                     st.offload ? "NIC" : "SW");
-        } else {
-            snprintf(msg, sizeof(msg), "시작됨");
-        }
-        return send_ack(fd, 1, msg);
+        return send_ack(fd, 1, msg[0] ? msg : "시작됨");
     }
 
     case MIR__V1__MSG_TYPE__MSG_TYPE_STOP_SCENARIO: {
@@ -405,12 +433,18 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
         if (req)
             mir__v1__stop_scenario_request__free_unpacked(req, NULL);
 
+        /* 어느 모드가 돌든 다 세운다 — 무엇이 실행 중인지 호출자가 몰라도
+         * 정지가 되게 한다. */
         mir_tx_status st;
-        int was = mir_tx_status_get(&st);
+        mir_session_stats ss;
+        mir_tx_status_get(&st);
+        mir_session_get_stats(&ss);
+        int was = st.tx_lcores > 0 || ss.active;
 
         char terr[256] = {0};
         if (mir_tx_stop(terr, sizeof(terr)) != 0)
             return send_ack(fd, 0, terr);
+        mir_session_request_stop();
 
         return send_ack(fd, 1, was ? "정지됨" : "실행 중인 시나리오가 없었다");
     }

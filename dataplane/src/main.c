@@ -47,6 +47,7 @@
 #include "ipc_server.h"
 #include "port.h"
 #include "rx_engine.h"
+#include "session.h"
 #include "stats.h"
 #include "tx_engine.h"
 #include "tx_hello.h"
@@ -319,22 +320,28 @@ int main(void)
         }
     }
 
-    /* TX 큐는 worker 수만큼. worker = 전체 - main - RX.
+    /* TX 큐 배치:
+     *   0 .. n_workers-1  : Mode A blast worker 전용
+     *   n_workers          : RX lcore 의 handshake(Mode B) 응답 전용
      * 큐를 시나리오 시작 시점에 늘릴 수는 없다 — rte_eth_dev_configure 는 포트
-     * stop 상태에서만 되고, 그러면 링크가 내려갔다 올라온다. */
+     * stop 상태에서만 되고, 그러면 링크가 내려갔다 올라온다. 그래서 최대치로
+     * 미리 잡는다. */
     uint16_t n_workers = (uint16_t)(args.n_lcores > 2 ? args.n_lcores - 2 : 1);
+    uint16_t sess_txq  = n_workers;                 /* RX lcore 전용 TX 큐 */
+    uint16_t n_tx_q    = (uint16_t)(n_workers + 1);
 
     /* ── 5. 포트 구성·start ───────────────────────────────────── */
     static mir_port dev[MIR_MAX_PORTS];
 
     for (size_t i = 0; i < n_ports; i++) {
         char perr[256] = {0};
-        if (mir_port_setup(ports[i].port_id, n_workers, &dev[i], perr, sizeof(perr)) != 0) {
+        if (mir_port_setup(ports[i].port_id, n_tx_q, &dev[i], perr, sizeof(perr)) != 0) {
             LOG(ERR, "port %u 구성 실패: %s", ports[i].port_id, perr);
             continue;
         }
         ports[i].started = 1;
-        LOG(INFO, "port %u: TX 큐 %u개 (worker), RX 큐 1개", ports[i].port_id, n_workers);
+        LOG(INFO, "port %u: TX 큐 %u개 (worker %u + handshake 1), RX 큐 1개",
+            ports[i].port_id, n_tx_q, n_workers);
         mir_port_wait_link(ports[i].port_id, LINK_WAIT_MS, NULL);
     }
 
@@ -374,6 +381,7 @@ int main(void)
         .n_lcores   = args.n_lcores,
         .main_lcore = rte_get_main_lcore(),
         .dev        = dev,
+        .sess_txq   = sess_txq,
     };
 
     if (ipc_server_start(&cfg) != 0) {
@@ -408,6 +416,7 @@ int main(void)
     /* worker 가 아직 tx/rx_burst 를 돌고 있는데 포트를 닫으면 그대로 깨진다.
      * 반드시 포트보다 먼저 세운다. */
     mir_tx_shutdown();
+    mir_session_shutdown();
     mir_rx_stop();
 
     for (size_t i = 0; i < n_ports; i++)

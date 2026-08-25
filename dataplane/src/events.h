@@ -22,13 +22,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 이벤트 종류 — proto 의 Event.Kind 와 값을 맞춘다 (변환 시 그대로 캐스팅). */
+/* 이벤트 종류 — proto 의 Event.Kind 와 값을 맞춘다 (변환 시 그대로 캐스팅).
+ * 새 값을 넣을 때는 proto 의 Kind enum 과 반드시 함께 고친다. */
 typedef enum {
-    MIR_EVENT_UNSPECIFIED     = 0,
-    MIR_EVENT_SYNACK_TIMEOUT  = 1,
-    MIR_EVENT_RST_RECEIVED    = 2,
-    MIR_EVENT_UNEXPECTED_FLAG = 3,
-    MIR_EVENT_RETRANSMIT      = 4,
+    MIR_EVENT_UNSPECIFIED      = 0,
+    MIR_EVENT_SYNACK_TIMEOUT   = 1,
+    MIR_EVENT_RST_RECEIVED     = 2,
+    MIR_EVENT_UNEXPECTED_FLAG  = 3,
+    MIR_EVENT_RETRANSMIT       = 4,
+    MIR_EVENT_HANDSHAKE_DONE   = 5,
+    MIR_EVENT_HANDSHAKE_REFUSED = 6,
 } mir_event_kind;
 
 #define MIR_EVENT_FLOWKEY_MAX 64
