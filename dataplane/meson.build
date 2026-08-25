@@ -15,6 +15,13 @@ dpdk       = dependency('libdpdk',       version: '>=22.11')
 protobuf_c = dependency('libprotobuf-c', version: '>=1.3')
 threads    = dependency('threads')
 
+# mbedTLS (Phase 5b) — 순수 C TLS. pkg-config 파일이 없어 라이브러리를 직접
+# 찾는다. 세 라이브러리 모두 필요하다: tls(ssl) → x509 → crypto.
+cc         = meson.get_compiler('c')
+mbedtls    = cc.find_library('mbedtls')
+mbedx509   = cc.find_library('mbedx509')
+mbedcrypto = cc.find_library('mbedcrypto')
+
 # ── 빌드 플래그 ───────────────────────────────────────────────
 #
 # _GNU_SOURCE 는 여기서 주지 않는다. 각 .c 가 첫 줄에 스스로 정의하고 있어
@@ -57,8 +64,9 @@ executable('mir-dataplane',
     'src/session.c',
     'src/pcap_reader.c',
     'src/replay.c',
+    'src/tls.c',
     pb_c,
   ],
   include_directories: include_directories('src'),
-  dependencies: [dpdk, protobuf_c, threads],
+  dependencies: [dpdk, protobuf_c, threads, mbedtls, mbedx509, mbedcrypto],
   install: true)

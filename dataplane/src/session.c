@@ -17,6 +17,7 @@
 
 #include "events.h"
 #include "stats.h"
+#include "tls.h"
 
 #define seterr(err, len, ...) \
     do { if ((err) && (len)) snprintf((err), (len), __VA_ARGS__); } while (0)
@@ -54,6 +55,7 @@ struct session {
     uint32_t snd_nxt;    /* 우리가 보낼 다음 seq */
     uint32_t rcv_nxt;    /* 상대에게 기대하는 다음 seq */
     uint64_t sent_ns;
+    mir_tls *tls;        /* TLS 세션 (Phase 5b). 평문이면 NULL. */
 };
 
 /* 제어 스레드가 스테이징하고 RX lcore 가 채택하는 설정. */
@@ -71,6 +73,11 @@ struct config {
     /* Phase 5a — 3-way 완료 후 보낼 L7 요청. spec 은 곧 free 되므로 복사해 둔다. */
     uint8_t  l7_req[MAX_L7_REQ];
     uint32_t l7_req_len;
+
+    /* Phase 5b — TLS. 인증서 파싱 등 무거운 준비는 제어 스레드가 tls_cfg 에
+     * 미리 해 두고(아래 g.staged_tls_cfg), 여기엔 세션마다 쓰는 값만 둔다. */
+    int  tls;
+    char sni[256];
 };
 
 static struct {
@@ -78,6 +85,11 @@ static struct {
     volatile int    pending_start;
     volatile int    pending_stop;
     struct config   staged;
+
+    /* TLS 공유 설정 — 제어 스레드가 만들고(무거운 인증서 파싱) RX lcore 가
+     * 채택한다. 평문이면 NULL. */
+    mir_tls_config *staged_tls_cfg;
+    mir_tls_config *tls_cfg;
 
     /* 아래는 RX lcore 만 만진다 (채택 후). */
     int             active;
@@ -181,7 +193,28 @@ int mir_session_request_start(const Mir__V1__HandshakeSpec *spec,
         c.l7_req_len = (uint32_t)spec->l7_request.len;
     }
 
+    /* ── TLS (Phase 5b) ─────────────────────────────────────
+     * 인증서 파싱 등 무거운 준비를 여기(제어 스레드)서 끝내 공유 설정을 만든다.
+     * RX lcore 는 세션마다 그걸로 setup 만 한다. */
+    mir_tls_config *tls_cfg = NULL;
+    if (spec->tls) {
+        c.tls = 1;
+        snprintf(c.sni, sizeof(c.sni), "%s",
+                 spec->sni && *spec->sni ? spec->sni : (spec->dst_ip ? spec->dst_ip : ""));
+
+        tls_cfg = mir_tls_config_new(
+            spec->verify_server ? 1 : 0,
+            spec->ca_cert.data,     spec->ca_cert.len,
+            spec->client_cert.data, spec->client_cert.len,
+            spec->client_key.data,  spec->client_key.len,
+            (int)spec->tls_min, (int)spec->tls_max,
+            err, errlen);
+        if (!tls_cfg)
+            return -1;   /* err 는 mir_tls_config_new 가 채웠다 */
+    }
+
     g.staged        = c;
+    g.staged_tls_cfg = tls_cfg;
     g.port          = port;
     g.tx_queue      = tx_queue_id;
     g.pending_start = 1;
@@ -261,12 +294,19 @@ static void send_seg(uint16_t src_port, uint32_t seq, uint32_t ack, uint8_t flag
 
 static void adopt(void)
 {
-    g.cfg = g.staged;
+    g.cfg     = g.staged;
+    g.tls_cfg = g.staged_tls_cfg;   /* 소유권을 넘겨받는다 */
+    g.staged_tls_cfg = NULL;
+
     g.tab = rte_zmalloc_socket("mir_sessions",
                                (size_t)g.cfg.sessions * sizeof(struct session),
                                0, rte_socket_id());
     if (!g.tab) {
         /* 메모리 부족 — 조용히 유휴로 남는다. 스테이징만 지운다. */
+        if (g.tls_cfg) {
+            mir_tls_config_free(g.tls_cfg);
+            g.tls_cfg = NULL;
+        }
         g.pending_start = 0;
         return;
     }
@@ -297,8 +337,18 @@ static void adopt(void)
 static void teardown(void)
 {
     if (g.tab) {
+        for (uint32_t i = 0; i < g.cfg.sessions; i++) {
+            if (g.tab[i].tls) {
+                mir_tls_free(g.tab[i].tls);
+                g.tab[i].tls = NULL;
+            }
+        }
         rte_free(g.tab);
         g.tab = NULL;
+    }
+    if (g.tls_cfg) {
+        mir_tls_config_free(g.tls_cfg);
+        g.tls_cfg = NULL;
     }
     g.active = 0;
     g.stats.active = 0;
@@ -372,11 +422,77 @@ void mir_session_service(uint64_t now_ns)
     }
 }
 
-/* ── 데이터 경로 처리 (RX lcore, Phase 5a) ─────────────────────
+/* ── TLS 다리 (RX lcore, Phase 5b) ─────────────────────────────
+ *
+ * tls_send: TLS 가 만든 레코드를 TCP 세그먼트로 쪼개 내보내고 snd_nxt 를
+ * 전진시킨다. 세그먼트 하나는 MAX_L7_REQ 를 넘지 않는다(mbuf·MSS 안전값).
+ * mir_tls 의 send 콜백으로 물린다 — TLS 는 seq/ack 를 모른다. */
+static void tls_send(void *ctx, const uint8_t *data, size_t len)
+{
+    struct session *s = ctx;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > MAX_L7_REQ)
+            chunk = MAX_L7_REQ;
+        send_seg_data(s->src_port, s->snd_nxt, s->rcv_nxt,
+                      RTE_TCP_PSH_FLAG | RTE_TCP_ACK_FLAG,
+                      data + off, (uint16_t)chunk);
+        s->snd_nxt += (uint32_t)chunk;
+        off += chunk;
+    }
+}
+
+/* TLS 상태 기계를 끝까지 돌린다(핸드셰이크 → app data). 인바운드는 이미
+ * mir_tls_feed 로 넣어 둔 상태에서 호출한다. 핸드셰이크가 끝나면 곧바로
+ * l7_request 를 TLS 위로 쓰고, 복호화된 응답에서 HTTP 상태를 본다. */
+static void tls_progress(struct session *s, uint64_t now_ns)
+{
+    uint8_t buf[2048];
+    for (;;) {
+        size_t outlen = 0;
+        mir_tls_status st = mir_tls_pump(s->tls, buf, sizeof(buf), &outlen);
+
+        if (st == MIR_TLS_HANDSHAKE_DONE) {
+            g.stats.tls_ok++;
+            emit(MIR_EVENT_HANDSHAKE_DONE, now_ns, s->src_port, 0,
+                 "TLS 핸드셰이크 완료");
+            if (g.cfg.l7_req_len > 0) {
+                mir_tls_write(s->tls, g.cfg.l7_req, g.cfg.l7_req_len);
+                g.stats.req_sent++;
+            }
+            continue;   /* app data 가 이미 버퍼에 있을 수 있다 */
+        }
+        if (st == MIR_TLS_APP_DATA) {
+            if (!s->got_resp) {
+                s->got_resp = 1;
+                g.stats.responded++;
+                if (outlen >= 12 && memcmp(buf, "HTTP/1.", 7) == 0 && buf[9] == '2')
+                    g.stats.http_2xx++;
+                emit(MIR_EVENT_HANDSHAKE_DONE, now_ns, s->src_port, 0, "HTTPS 응답 수신");
+            }
+            g.stats.bytes_rx += outlen;
+            continue;
+        }
+        if (st == MIR_TLS_WANT_MORE || st == MIR_TLS_CLOSED)
+            break;
+
+        /* ERROR — 핸드셰이크/복호화 실패. RST 로 급종료한다. */
+        g.stats.tls_failed++;
+        emit(MIR_EVENT_HANDSHAKE_REFUSED, now_ns, s->src_port, 0,
+             mir_tls_error(s->tls));
+        send_seg(s->src_port, s->snd_nxt, s->rcv_nxt, RTE_TCP_RST_FLAG);
+        s->state = S_CLOSED;
+        break;
+    }
+}
+
+/* ── 데이터 경로 처리 (RX lcore, Phase 5a/5b) ─────────────────
  *
  * S_ESTABLISHED 세션으로 오는 세그먼트를 처리한다. 순서 맞는 데이터만 받아
- * rcv_nxt 를 전진시키고 ACK 로 확인하며, 응답 첫 세그먼트에서 HTTP 상태줄을
- * 본다. 상대 FIN 이 오면 우리도 FIN|ACK 로 닫는다.
+ * rcv_nxt 를 전진시키고 ACK 로 확인한다. 평문이면 응답 첫 세그먼트에서 HTTP
+ * 상태줄을, TLS(s->tls≠NULL)면 그 바이트를 mir_tls 로 넘겨 복호화·판정한다.
+ * 상대 FIN 이 오면 우리도 FIN|ACK 로 닫는다.
  *
  * 재전송·윈도우·혼잡제어는 없다 — 점대점 로컬 링크에서 손실이 무시할 수준인
  * 검증 도구라, 손실 시 세션은 그냥 응답 미완으로 남고 STOP 이 거둔다. */
@@ -394,24 +510,36 @@ static void handle_established(struct session *s, const struct rte_ipv4_hdr *ip,
     const uint8_t *payload = (const uint8_t *)tcp + thl;
 
     if (f & RTE_TCP_RST_FLAG) {
+        if (s->tls)
+            g.stats.tls_failed++;
         s->state = S_CLOSED;
         return;
     }
 
     /* 순서 맞는 데이터만 받아들인다 (순서 어긋나면 현재 rcv_nxt 로 재-ACK). */
     if (datalen > 0 && their_seq == s->rcv_nxt) {
-        if (!s->got_resp) {
-            s->got_resp = 1;
-            g.stats.responded++;
-            /* "HTTP/1.x 2NN" — 상태줄 첫 자리가 2 면 2xx. */
-            if (datalen >= 12 && memcmp(payload, "HTTP/1.", 7) == 0 &&
-                payload[9] == '2')
-                g.stats.http_2xx++;
-            emit(MIR_EVENT_HANDSHAKE_DONE, now_ns, s->src_port, 0, "L7 응답 수신");
-        }
         s->rcv_nxt += (uint32_t)datalen;
-        g.stats.bytes_rx += (uint32_t)datalen;
+
+        if (s->tls) {
+            /* 암호문을 TLS 로 넘긴다. 복호화·판정·응답은 tls_progress 가 한다. */
+            mir_tls_feed(s->tls, payload, (size_t)datalen);
+            tls_progress(s, now_ns);
+        } else {
+            if (!s->got_resp) {
+                s->got_resp = 1;
+                g.stats.responded++;
+                /* "HTTP/1.x 2NN" — 상태줄 첫 자리가 2 면 2xx. */
+                if (datalen >= 12 && memcmp(payload, "HTTP/1.", 7) == 0 &&
+                    payload[9] == '2')
+                    g.stats.http_2xx++;
+                emit(MIR_EVENT_HANDSHAKE_DONE, now_ns, s->src_port, 0, "L7 응답 수신");
+            }
+            g.stats.bytes_rx += (uint32_t)datalen;
+        }
     }
+
+    if (s->state == S_CLOSED)   /* tls_progress 가 오류로 닫았다 */
+        return;
 
     /* FIN — 순서 맞으면 소비하고 우리도 닫는다. */
     if ((f & RTE_TCP_FIN_FLAG) && their_seq + (uint32_t)datalen == s->rcv_nxt) {
@@ -425,7 +553,9 @@ static void handle_established(struct session *s, const struct rte_ipv4_hdr *ip,
         return;
     }
 
-    /* 데이터를 받았으면 ACK 로 확인해 준다 (FIN 이면 위에서 이미 닫았다). */
+    /* 데이터를 받았으면 ACK 로 확인해 준다 (FIN 이면 위에서 이미 닫았다).
+     * TLS 는 tls_send 가 레코드에 ack 를 실어 보냈을 수 있지만, 응답만 받고
+     * 보낼 게 없을 때(핸드셰이크 중간 등)를 위해 순수 ACK 를 항상 보낸다. */
     if (datalen > 0)
         send_seg(s->src_port, s->snd_nxt, s->rcv_nxt, RTE_TCP_ACK_FLAG);
 }
@@ -521,7 +651,27 @@ int mir_session_handle(struct rte_mbuf *m, uint64_t now_ns)
     default:  /* UNSPECIFIED = COMPLETE */
         send_seg(our_port, our_next, their_next, RTE_TCP_ACK_FLAG);  /* 3-way 완료 */
 
-        if (g.cfg.l7_req_len > 0) {
+        if (g.cfg.tls) {
+            /* Phase 5b — TLS 핸드셰이크를 시작한다(ClientHello 를 내보낸다).
+             * 요청은 핸드셰이크가 끝난 뒤 tls_progress 가 TLS 위로 쓴다. */
+            s->got_resp = 0;
+            s->fin_sent = 0;
+            s->state    = S_ESTABLISHED;
+            g.stats.established++;
+            s->tls = mir_tls_new(g.tls_cfg, g.cfg.sni[0] ? g.cfg.sni : NULL,
+                                 tls_send, s);
+            if (!s->tls) {
+                g.stats.tls_failed++;
+                send_seg(our_port, s->snd_nxt, s->rcv_nxt, RTE_TCP_RST_FLAG);
+                s->state = S_CLOSED;
+                emit(MIR_EVENT_HANDSHAKE_REFUSED, now_ns, our_port, rtt_us,
+                     "TLS 초기화 실패");
+                return 1;
+            }
+            tls_progress(s, now_ns);   /* ClientHello 를 tls_send 로 내보낸다 */
+            emit(MIR_EVENT_HANDSHAKE_DONE, now_ns, our_port, rtt_us,
+                 "3-way 완료+TLS 시작");
+        } else if (g.cfg.l7_req_len > 0) {
             /* Phase 5a — 요청을 실어 보내고 데이터 경로로 진입한다. */
             send_seg_data(our_port, s->snd_nxt, s->rcv_nxt,
                           RTE_TCP_PSH_FLAG | RTE_TCP_ACK_FLAG,

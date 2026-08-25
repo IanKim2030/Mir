@@ -46,6 +46,10 @@ typedef struct {
     uint32_t closed;        /* FIN 교환으로 정상 종료 */
     uint64_t bytes_rx;      /* 받은 응답 바이트 누계 */
     uint32_t http_2xx;      /* 상태줄이 HTTP 2xx 인 수 */
+
+    /* TLS (Phase 5b) — tls=true 일 때만 진행. */
+    uint32_t tls_ok;        /* TLS 핸드셰이크 성공 */
+    uint32_t tls_failed;    /* TLS 핸드셰이크 실패 */
 } mir_session_stats;
 
 /*

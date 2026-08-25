@@ -263,8 +263,34 @@ message HandshakeSpec {
 
   // 3-way 가 완료(ACK)된 뒤 선로에 실어 보낼 L7 요청 바이트 (Phase 5a).
   // 비우면 Phase 4 동작(핸드셰이크만) 그대로다. on_synack=COMPLETE 일 때만 쓴다.
-  // 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n". TLS 는 5b.
+  // 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n".
+  // tls=true 면 이 바이트를 TLS 위에 실어 보낸다(HTTPS 요청).
   bytes l7_request = 9;
+
+  // ── TLS (Phase 5b) ──────────────────────────────────────
+  // true 면 3-way 완료 후 TLS 핸드셰이크(mbedTLS)를 맺고 그 위에 l7_request 를
+  // 보낸다. false 면 5a 의 평문 경로.
+  bool tls = 10;
+
+  string sni = 11;  // SNI 서버 이름. 비면 dst_ip 문자열.
+
+  // 허용 TLS 버전 범위. AUTO 면 mbedTLS 기본(1.2~1.3).
+  enum TlsVersion {
+    TLS_VERSION_UNSPECIFIED = 0;  // AUTO — mbedTLS 기본(1.2~1.3)
+    TLS_VERSION_1_2         = 1;
+    TLS_VERSION_1_3         = 2;
+  }
+  TlsVersion tls_min = 12;
+  TlsVersion tls_max = 13;
+
+  // 서버 인증서 검증. true 면 ca_cert 로 검증하고 실패 시 핸드셰이크 중단.
+  // false(기본) 면 검증 생략 — 대상 서버를 시험하는 도구라 흔한 선택이다.
+  bool  verify_server = 14;
+  bytes ca_cert       = 15;  // PEM. verify_server 일 때 신뢰 앵커.
+
+  // 클라이언트 인증서 (mTLS). 서버가 요구하면 제시한다. 둘 다 있어야 유효.
+  bytes client_cert = 16;  // PEM
+  bytes client_key  = 17;  // PEM
 }
 
 message StopScenarioRequest {
@@ -349,7 +375,11 @@ message HandshakeStats {
   uint32 responded   = 12;  // 응답 첫 세그먼트를 받은 수
   uint32 closed      = 13;  // FIN 교환으로 정상 종료한 수
   uint64 bytes_rx    = 14;  // 받은 응답 바이트 누계
-  uint32 http_2xx    = 15;  // 응답 상태줄이 HTTP 2xx 인 수 (평문 HTTP)
+  uint32 http_2xx    = 15;  // 응답 상태줄이 HTTP 2xx 인 수 (평문/TLS 공통)
+
+  // TLS (Phase 5b). tls=true 일 때만 진행한다.
+  uint32 tls_ok     = 16;  // TLS 핸드셰이크 성공
+  uint32 tls_failed = 17;  // TLS 핸드셰이크 실패
 }
 
 // TCP 플래그별 수신 분류. handshake 검증의 1차 지표다.

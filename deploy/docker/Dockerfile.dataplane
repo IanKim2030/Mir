@@ -33,10 +33,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnuma-dev \
         libprotobuf-c-dev \
         protobuf-c-compiler \
+        libmbedtls-dev \
         wget \
         xz-utils \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# ── mbedTLS 참고 ─────────────────────────────────────────────
+# TLS(Phase 5b)는 **순수 C** 인 mbedTLS 로 한다 — gRPC 를 Go 로 뺀 것과 같은
+# 이유로 데이터플레인에 C++(OpenSSL/BoringSSL)를 들이지 않기 위해서다.
+# Ubuntu 26.04 는 mbedTLS 3.6.x LTS 를 담고 있고 pkg-config 파일이 없어
+# meson 은 cc.find_library 로 -lmbedtls -lmbedx509 -lmbedcrypto 를 링크한다.
+# ldd 로 확인: libstdc++ 가 붙지 않는다(스모크 검증 완료).
 
 # ── DPDK ─────────────────────────────────────────────────────
 # -Dplatform=generic 이 핵심: 이게 없으면 DPDK 가 빌드 머신에 맞춰
@@ -93,6 +101,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnuma1 \
         libatomic1 \
         libprotobuf-c1 \
+        libmbedtls21 \
+        libmbedx509-7 \
+        libmbedcrypto16 \
         python3-minimal \
     && rm -rf /var/lib/apt/lists/*
 

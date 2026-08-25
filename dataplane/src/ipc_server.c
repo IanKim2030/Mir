@@ -337,6 +337,8 @@ static int send_telemetry(int fd)
         hs.closed      = ss.closed;
         hs.bytes_rx    = ss.bytes_rx;
         hs.http_2xx    = ss.http_2xx;
+        hs.tls_ok      = ss.tls_ok;
+        hs.tls_failed  = ss.tls_failed;
         snap.handshake = &hs;
     }
 

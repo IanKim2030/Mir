@@ -177,6 +177,10 @@ type handshakeStats struct {
 	Closed      uint32 `json:"closed"`
 	BytesRx     uint64 `json:"bytesRx"`
 	Http2xx     uint32 `json:"http2xx"`
+
+	// TLS (Phase 5b).
+	TLSOk     uint32 `json:"tlsOk"`
+	TLSFailed uint32 `json:"tlsFailed"`
 }
 
 type rxClass struct {
@@ -293,6 +297,7 @@ func (s *Server) instanceViews() []instanceView {
 					RttMinUs: hs.RttMinUs, RttAvgUs: hs.RttAvgUs, RttMaxUs: hs.RttMaxUs,
 					Established: hs.Established, ReqSent: hs.ReqSent, Responded: hs.Responded,
 					Closed: hs.Closed, BytesRx: hs.BytesRx, Http2xx: hs.Http_2Xx,
+					TLSOk: hs.TlsOk, TLSFailed: hs.TlsFailed,
 				}
 			}
 		}

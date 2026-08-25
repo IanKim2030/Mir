@@ -177,6 +177,56 @@ func (HandshakeSpec_Action) EnumDescriptor() ([]byte, []int) {
 	return file_dataplane_proto_rawDescGZIP(), []int{11, 0}
 }
 
+// 허용 TLS 버전 범위. AUTO 면 mbedTLS 기본(1.2~1.3).
+type HandshakeSpec_TlsVersion int32
+
+const (
+	HandshakeSpec_TLS_VERSION_UNSPECIFIED HandshakeSpec_TlsVersion = 0 // AUTO — mbedTLS 기본(1.2~1.3)
+	HandshakeSpec_TLS_VERSION_1_2         HandshakeSpec_TlsVersion = 1
+	HandshakeSpec_TLS_VERSION_1_3         HandshakeSpec_TlsVersion = 2
+)
+
+// Enum value maps for HandshakeSpec_TlsVersion.
+var (
+	HandshakeSpec_TlsVersion_name = map[int32]string{
+		0: "TLS_VERSION_UNSPECIFIED",
+		1: "TLS_VERSION_1_2",
+		2: "TLS_VERSION_1_3",
+	}
+	HandshakeSpec_TlsVersion_value = map[string]int32{
+		"TLS_VERSION_UNSPECIFIED": 0,
+		"TLS_VERSION_1_2":         1,
+		"TLS_VERSION_1_3":         2,
+	}
+)
+
+func (x HandshakeSpec_TlsVersion) Enum() *HandshakeSpec_TlsVersion {
+	p := new(HandshakeSpec_TlsVersion)
+	*p = x
+	return p
+}
+
+func (x HandshakeSpec_TlsVersion) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HandshakeSpec_TlsVersion) Descriptor() protoreflect.EnumDescriptor {
+	return file_dataplane_proto_enumTypes[2].Descriptor()
+}
+
+func (HandshakeSpec_TlsVersion) Type() protoreflect.EnumType {
+	return &file_dataplane_proto_enumTypes[2]
+}
+
+func (x HandshakeSpec_TlsVersion) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HandshakeSpec_TlsVersion.Descriptor instead.
+func (HandshakeSpec_TlsVersion) EnumDescriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{11, 1}
+}
+
 type Event_Kind int32
 
 const (
@@ -222,11 +272,11 @@ func (x Event_Kind) String() string {
 }
 
 func (Event_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_dataplane_proto_enumTypes[2].Descriptor()
+	return file_dataplane_proto_enumTypes[3].Descriptor()
 }
 
 func (Event_Kind) Type() protoreflect.EnumType {
-	return &file_dataplane_proto_enumTypes[2]
+	return &file_dataplane_proto_enumTypes[3]
 }
 
 func (x Event_Kind) Number() protoreflect.EnumNumber {
@@ -1252,8 +1302,23 @@ type HandshakeSpec struct {
 	SynackTimeoutMs uint32 `protobuf:"varint,8,opt,name=synack_timeout_ms,json=synackTimeoutMs,proto3" json:"synack_timeout_ms,omitempty"`
 	// 3-way 가 완료(ACK)된 뒤 선로에 실어 보낼 L7 요청 바이트 (Phase 5a).
 	// 비우면 Phase 4 동작(핸드셰이크만) 그대로다. on_synack=COMPLETE 일 때만 쓴다.
-	// 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n". TLS 는 5b.
-	L7Request     []byte `protobuf:"bytes,9,opt,name=l7_request,json=l7Request,proto3" json:"l7_request,omitempty"`
+	// 평문 HTTP 라면 예: "GET / HTTP/1.0\r\nHost: t\r\n\r\n".
+	// tls=true 면 이 바이트를 TLS 위에 실어 보낸다(HTTPS 요청).
+	L7Request []byte `protobuf:"bytes,9,opt,name=l7_request,json=l7Request,proto3" json:"l7_request,omitempty"`
+	// ── TLS (Phase 5b) ──────────────────────────────────────
+	// true 면 3-way 완료 후 TLS 핸드셰이크(mbedTLS)를 맺고 그 위에 l7_request 를
+	// 보낸다. false 면 5a 의 평문 경로.
+	Tls    bool                     `protobuf:"varint,10,opt,name=tls,proto3" json:"tls,omitempty"`
+	Sni    string                   `protobuf:"bytes,11,opt,name=sni,proto3" json:"sni,omitempty"` // SNI 서버 이름. 비면 dst_ip 문자열.
+	TlsMin HandshakeSpec_TlsVersion `protobuf:"varint,12,opt,name=tls_min,json=tlsMin,proto3,enum=mir.v1.HandshakeSpec_TlsVersion" json:"tls_min,omitempty"`
+	TlsMax HandshakeSpec_TlsVersion `protobuf:"varint,13,opt,name=tls_max,json=tlsMax,proto3,enum=mir.v1.HandshakeSpec_TlsVersion" json:"tls_max,omitempty"`
+	// 서버 인증서 검증. true 면 ca_cert 로 검증하고 실패 시 핸드셰이크 중단.
+	// false(기본) 면 검증 생략 — 대상 서버를 시험하는 도구라 흔한 선택이다.
+	VerifyServer bool   `protobuf:"varint,14,opt,name=verify_server,json=verifyServer,proto3" json:"verify_server,omitempty"`
+	CaCert       []byte `protobuf:"bytes,15,opt,name=ca_cert,json=caCert,proto3" json:"ca_cert,omitempty"` // PEM. verify_server 일 때 신뢰 앵커.
+	// 클라이언트 인증서 (mTLS). 서버가 요구하면 제시한다. 둘 다 있어야 유효.
+	ClientCert    []byte `protobuf:"bytes,16,opt,name=client_cert,json=clientCert,proto3" json:"client_cert,omitempty"` // PEM
+	ClientKey     []byte `protobuf:"bytes,17,opt,name=client_key,json=clientKey,proto3" json:"client_key,omitempty"`    // PEM
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1347,6 +1412,62 @@ func (x *HandshakeSpec) GetSynackTimeoutMs() uint32 {
 func (x *HandshakeSpec) GetL7Request() []byte {
 	if x != nil {
 		return x.L7Request
+	}
+	return nil
+}
+
+func (x *HandshakeSpec) GetTls() bool {
+	if x != nil {
+		return x.Tls
+	}
+	return false
+}
+
+func (x *HandshakeSpec) GetSni() string {
+	if x != nil {
+		return x.Sni
+	}
+	return ""
+}
+
+func (x *HandshakeSpec) GetTlsMin() HandshakeSpec_TlsVersion {
+	if x != nil {
+		return x.TlsMin
+	}
+	return HandshakeSpec_TLS_VERSION_UNSPECIFIED
+}
+
+func (x *HandshakeSpec) GetTlsMax() HandshakeSpec_TlsVersion {
+	if x != nil {
+		return x.TlsMax
+	}
+	return HandshakeSpec_TLS_VERSION_UNSPECIFIED
+}
+
+func (x *HandshakeSpec) GetVerifyServer() bool {
+	if x != nil {
+		return x.VerifyServer
+	}
+	return false
+}
+
+func (x *HandshakeSpec) GetCaCert() []byte {
+	if x != nil {
+		return x.CaCert
+	}
+	return nil
+}
+
+func (x *HandshakeSpec) GetClientCert() []byte {
+	if x != nil {
+		return x.ClientCert
+	}
+	return nil
+}
+
+func (x *HandshakeSpec) GetClientKey() []byte {
+	if x != nil {
+		return x.ClientKey
 	}
 	return nil
 }
@@ -1706,12 +1827,15 @@ type HandshakeStats struct {
 	RttAvgUs  uint32                 `protobuf:"varint,8,opt,name=rtt_avg_us,json=rttAvgUs,proto3" json:"rtt_avg_us,omitempty"`
 	RttMaxUs  uint32                 `protobuf:"varint,9,opt,name=rtt_max_us,json=rttMaxUs,proto3" json:"rtt_max_us,omitempty"`
 	// 데이터 경로 (Phase 5a). l7_request 가 있을 때만 진행한다.
-	Established   uint32 `protobuf:"varint,10,opt,name=established,proto3" json:"established,omitempty"`        // 3-way 완료(ACK 보냄)
-	ReqSent       uint32 `protobuf:"varint,11,opt,name=req_sent,json=reqSent,proto3" json:"req_sent,omitempty"` // L7 요청을 실제로 보낸 수
-	Responded     uint32 `protobuf:"varint,12,opt,name=responded,proto3" json:"responded,omitempty"`            // 응답 첫 세그먼트를 받은 수
-	Closed        uint32 `protobuf:"varint,13,opt,name=closed,proto3" json:"closed,omitempty"`                  // FIN 교환으로 정상 종료한 수
-	BytesRx       uint64 `protobuf:"varint,14,opt,name=bytes_rx,json=bytesRx,proto3" json:"bytes_rx,omitempty"` // 받은 응답 바이트 누계
-	Http_2Xx      uint32 `protobuf:"varint,15,opt,name=http_2xx,json=http2xx,proto3" json:"http_2xx,omitempty"` // 응답 상태줄이 HTTP 2xx 인 수 (평문 HTTP)
+	Established uint32 `protobuf:"varint,10,opt,name=established,proto3" json:"established,omitempty"`        // 3-way 완료(ACK 보냄)
+	ReqSent     uint32 `protobuf:"varint,11,opt,name=req_sent,json=reqSent,proto3" json:"req_sent,omitempty"` // L7 요청을 실제로 보낸 수
+	Responded   uint32 `protobuf:"varint,12,opt,name=responded,proto3" json:"responded,omitempty"`            // 응답 첫 세그먼트를 받은 수
+	Closed      uint32 `protobuf:"varint,13,opt,name=closed,proto3" json:"closed,omitempty"`                  // FIN 교환으로 정상 종료한 수
+	BytesRx     uint64 `protobuf:"varint,14,opt,name=bytes_rx,json=bytesRx,proto3" json:"bytes_rx,omitempty"` // 받은 응답 바이트 누계
+	Http_2Xx    uint32 `protobuf:"varint,15,opt,name=http_2xx,json=http2xx,proto3" json:"http_2xx,omitempty"` // 응답 상태줄이 HTTP 2xx 인 수 (평문/TLS 공통)
+	// TLS (Phase 5b). tls=true 일 때만 진행한다.
+	TlsOk         uint32 `protobuf:"varint,16,opt,name=tls_ok,json=tlsOk,proto3" json:"tls_ok,omitempty"`             // TLS 핸드셰이크 성공
+	TlsFailed     uint32 `protobuf:"varint,17,opt,name=tls_failed,json=tlsFailed,proto3" json:"tls_failed,omitempty"` // TLS 핸드셰이크 실패
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1847,6 +1971,20 @@ func (x *HandshakeStats) GetBytesRx() uint64 {
 func (x *HandshakeStats) GetHttp_2Xx() uint32 {
 	if x != nil {
 		return x.Http_2Xx
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetTlsOk() uint32 {
+	if x != nil {
+		return x.TlsOk
+	}
+	return 0
+}
+
+func (x *HandshakeStats) GetTlsFailed() uint32 {
+	if x != nil {
+		return x.TlsFailed
 	}
 	return 0
 }
@@ -2199,7 +2337,7 @@ const file_dataplane_proto_rawDesc = "" +
 	"\x05speed\x18\x02 \x01(\x01R\x05speed\x12\x12\n" +
 	"\x04loop\x18\x03 \x01(\rR\x04loop\x12\x1b\n" +
 	"\tfirst_pkt\x18\x04 \x01(\rR\bfirstPkt\x12\x19\n" +
-	"\blast_pkt\x18\x05 \x01(\rR\alastPkt\"\x9e\x03\n" +
+	"\blast_pkt\x18\x05 \x01(\rR\alastPkt\"\x8b\x06\n" +
 	"\rHandshakeSpec\x12!\n" +
 	"\x03eth\x18\x01 \x01(\v2\x0f.mir.v1.EthSpecR\x03eth\x12\x15\n" +
 	"\x06src_ip\x18\x02 \x01(\tR\x05srcIp\x12\x15\n" +
@@ -2210,13 +2348,29 @@ const file_dataplane_proto_rawDesc = "" +
 	"\ton_synack\x18\a \x01(\x0e2\x1c.mir.v1.HandshakeSpec.ActionR\bonSynack\x12*\n" +
 	"\x11synack_timeout_ms\x18\b \x01(\rR\x0fsynackTimeoutMs\x12\x1d\n" +
 	"\n" +
-	"l7_request\x18\t \x01(\fR\tl7Request\"[\n" +
+	"l7_request\x18\t \x01(\fR\tl7Request\x12\x10\n" +
+	"\x03tls\x18\n" +
+	" \x01(\bR\x03tls\x12\x10\n" +
+	"\x03sni\x18\v \x01(\tR\x03sni\x129\n" +
+	"\atls_min\x18\f \x01(\x0e2 .mir.v1.HandshakeSpec.TlsVersionR\x06tlsMin\x129\n" +
+	"\atls_max\x18\r \x01(\x0e2 .mir.v1.HandshakeSpec.TlsVersionR\x06tlsMax\x12#\n" +
+	"\rverify_server\x18\x0e \x01(\bR\fverifyServer\x12\x17\n" +
+	"\aca_cert\x18\x0f \x01(\fR\x06caCert\x12\x1f\n" +
+	"\vclient_cert\x18\x10 \x01(\fR\n" +
+	"clientCert\x12\x1d\n" +
+	"\n" +
+	"client_key\x18\x11 \x01(\fR\tclientKey\"[\n" +
 	"\x06Action\x12\x16\n" +
 	"\x12ACTION_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fACTION_COMPLETE\x10\x01\x12\x14\n" +
 	"\x10ACTION_HALF_OPEN\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_RST\x10\x03\"6\n" +
+	"ACTION_RST\x10\x03\"S\n" +
+	"\n" +
+	"TlsVersion\x12\x1b\n" +
+	"\x17TLS_VERSION_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fTLS_VERSION_1_2\x10\x01\x12\x13\n" +
+	"\x0fTLS_VERSION_1_3\x10\x02\"6\n" +
 	"\x13StopScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\"/\n" +
@@ -2245,7 +2399,7 @@ const file_dataplane_proto_rawDesc = "" +
 	"\atx_drop\x18\b \x01(\x04R\x06txDrop\x12\x1f\n" +
 	"\x02rx\x18\t \x01(\v2\x0f.mir.v1.RxClassR\x02rx\x124\n" +
 	"\thandshake\x18\n" +
-	" \x01(\v2\x16.mir.v1.HandshakeStatsR\thandshake\"\xb0\x03\n" +
+	" \x01(\v2\x16.mir.v1.HandshakeStatsR\thandshake\"\xe6\x03\n" +
 	"\x0eHandshakeStats\x12\x1a\n" +
 	"\bsessions\x18\x01 \x01(\rR\bsessions\x12\x12\n" +
 	"\x04sent\x18\x02 \x01(\rR\x04sent\x12\x16\n" +
@@ -2265,7 +2419,10 @@ const file_dataplane_proto_rawDesc = "" +
 	"\tresponded\x18\f \x01(\rR\tresponded\x12\x16\n" +
 	"\x06closed\x18\r \x01(\rR\x06closed\x12\x19\n" +
 	"\bbytes_rx\x18\x0e \x01(\x04R\abytesRx\x12\x19\n" +
-	"\bhttp_2xx\x18\x0f \x01(\rR\ahttp2xx\"\xd3\x01\n" +
+	"\bhttp_2xx\x18\x0f \x01(\rR\ahttp2xx\x12\x15\n" +
+	"\x06tls_ok\x18\x10 \x01(\rR\x05tlsOk\x12\x1d\n" +
+	"\n" +
+	"tls_failed\x18\x11 \x01(\rR\ttlsFailed\"\xd3\x01\n" +
 	"\aRxClass\x12\x17\n" +
 	"\atcp_syn\x18\x01 \x01(\x04R\x06tcpSyn\x12\x1e\n" +
 	"\vtcp_syn_ack\x18\x02 \x01(\x04R\ttcpSynAck\x12\x17\n" +
@@ -2320,65 +2477,68 @@ func file_dataplane_proto_rawDescGZIP() []byte {
 	return file_dataplane_proto_rawDescData
 }
 
-var file_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_dataplane_proto_goTypes = []any{
 	(MsgType)(0),                   // 0: mir.v1.MsgType
 	(HandshakeSpec_Action)(0),      // 1: mir.v1.HandshakeSpec.Action
-	(Event_Kind)(0),                // 2: mir.v1.Event.Kind
-	(*HelloRequest)(nil),           // 3: mir.v1.HelloRequest
-	(*PortInfo)(nil),               // 4: mir.v1.PortInfo
-	(*HelloResponse)(nil),          // 5: mir.v1.HelloResponse
-	(*EthSpec)(nil),                // 6: mir.v1.EthSpec
-	(*Ipv4Spec)(nil),               // 7: mir.v1.Ipv4Spec
-	(*Ipv6Spec)(nil),               // 8: mir.v1.Ipv6Spec
-	(*TcpSpec)(nil),                // 9: mir.v1.TcpSpec
-	(*UdpSpec)(nil),                // 10: mir.v1.UdpSpec
-	(*PacketSpec)(nil),             // 11: mir.v1.PacketSpec
-	(*StartScenarioRequest)(nil),   // 12: mir.v1.StartScenarioRequest
-	(*ReplayOpts)(nil),             // 13: mir.v1.ReplayOpts
-	(*HandshakeSpec)(nil),          // 14: mir.v1.HandshakeSpec
-	(*StopScenarioRequest)(nil),    // 15: mir.v1.StopScenarioRequest
-	(*Ack)(nil),                    // 16: mir.v1.Ack
-	(*PortStats)(nil),              // 17: mir.v1.PortStats
-	(*TelemetrySnapshot)(nil),      // 18: mir.v1.TelemetrySnapshot
-	(*HandshakeStats)(nil),         // 19: mir.v1.HandshakeStats
-	(*RxClass)(nil),                // 20: mir.v1.RxClass
-	(*Event)(nil),                  // 21: mir.v1.Event
-	(*StreamTelemetryRequest)(nil), // 22: mir.v1.StreamTelemetryRequest
-	(*StreamEventsRequest)(nil),    // 23: mir.v1.StreamEventsRequest
+	(HandshakeSpec_TlsVersion)(0),  // 2: mir.v1.HandshakeSpec.TlsVersion
+	(Event_Kind)(0),                // 3: mir.v1.Event.Kind
+	(*HelloRequest)(nil),           // 4: mir.v1.HelloRequest
+	(*PortInfo)(nil),               // 5: mir.v1.PortInfo
+	(*HelloResponse)(nil),          // 6: mir.v1.HelloResponse
+	(*EthSpec)(nil),                // 7: mir.v1.EthSpec
+	(*Ipv4Spec)(nil),               // 8: mir.v1.Ipv4Spec
+	(*Ipv6Spec)(nil),               // 9: mir.v1.Ipv6Spec
+	(*TcpSpec)(nil),                // 10: mir.v1.TcpSpec
+	(*UdpSpec)(nil),                // 11: mir.v1.UdpSpec
+	(*PacketSpec)(nil),             // 12: mir.v1.PacketSpec
+	(*StartScenarioRequest)(nil),   // 13: mir.v1.StartScenarioRequest
+	(*ReplayOpts)(nil),             // 14: mir.v1.ReplayOpts
+	(*HandshakeSpec)(nil),          // 15: mir.v1.HandshakeSpec
+	(*StopScenarioRequest)(nil),    // 16: mir.v1.StopScenarioRequest
+	(*Ack)(nil),                    // 17: mir.v1.Ack
+	(*PortStats)(nil),              // 18: mir.v1.PortStats
+	(*TelemetrySnapshot)(nil),      // 19: mir.v1.TelemetrySnapshot
+	(*HandshakeStats)(nil),         // 20: mir.v1.HandshakeStats
+	(*RxClass)(nil),                // 21: mir.v1.RxClass
+	(*Event)(nil),                  // 22: mir.v1.Event
+	(*StreamTelemetryRequest)(nil), // 23: mir.v1.StreamTelemetryRequest
+	(*StreamEventsRequest)(nil),    // 24: mir.v1.StreamEventsRequest
 }
 var file_dataplane_proto_depIdxs = []int32{
-	4,  // 0: mir.v1.HelloResponse.ports:type_name -> mir.v1.PortInfo
-	6,  // 1: mir.v1.PacketSpec.eth:type_name -> mir.v1.EthSpec
-	7,  // 2: mir.v1.PacketSpec.ipv4:type_name -> mir.v1.Ipv4Spec
-	8,  // 3: mir.v1.PacketSpec.ipv6:type_name -> mir.v1.Ipv6Spec
-	9,  // 4: mir.v1.PacketSpec.tcp:type_name -> mir.v1.TcpSpec
-	10, // 5: mir.v1.PacketSpec.udp:type_name -> mir.v1.UdpSpec
-	11, // 6: mir.v1.StartScenarioRequest.packet:type_name -> mir.v1.PacketSpec
-	14, // 7: mir.v1.StartScenarioRequest.handshake:type_name -> mir.v1.HandshakeSpec
-	13, // 8: mir.v1.StartScenarioRequest.replay:type_name -> mir.v1.ReplayOpts
-	6,  // 9: mir.v1.HandshakeSpec.eth:type_name -> mir.v1.EthSpec
+	5,  // 0: mir.v1.HelloResponse.ports:type_name -> mir.v1.PortInfo
+	7,  // 1: mir.v1.PacketSpec.eth:type_name -> mir.v1.EthSpec
+	8,  // 2: mir.v1.PacketSpec.ipv4:type_name -> mir.v1.Ipv4Spec
+	9,  // 3: mir.v1.PacketSpec.ipv6:type_name -> mir.v1.Ipv6Spec
+	10, // 4: mir.v1.PacketSpec.tcp:type_name -> mir.v1.TcpSpec
+	11, // 5: mir.v1.PacketSpec.udp:type_name -> mir.v1.UdpSpec
+	12, // 6: mir.v1.StartScenarioRequest.packet:type_name -> mir.v1.PacketSpec
+	15, // 7: mir.v1.StartScenarioRequest.handshake:type_name -> mir.v1.HandshakeSpec
+	14, // 8: mir.v1.StartScenarioRequest.replay:type_name -> mir.v1.ReplayOpts
+	7,  // 9: mir.v1.HandshakeSpec.eth:type_name -> mir.v1.EthSpec
 	1,  // 10: mir.v1.HandshakeSpec.on_synack:type_name -> mir.v1.HandshakeSpec.Action
-	17, // 11: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
-	20, // 12: mir.v1.TelemetrySnapshot.rx:type_name -> mir.v1.RxClass
-	19, // 13: mir.v1.TelemetrySnapshot.handshake:type_name -> mir.v1.HandshakeStats
-	2,  // 14: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
-	3,  // 15: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
-	12, // 16: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
-	15, // 17: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
-	22, // 18: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
-	23, // 19: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
-	5,  // 20: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
-	16, // 21: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
-	16, // 22: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
-	18, // 23: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
-	21, // 24: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
-	20, // [20:25] is the sub-list for method output_type
-	15, // [15:20] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	2,  // 11: mir.v1.HandshakeSpec.tls_min:type_name -> mir.v1.HandshakeSpec.TlsVersion
+	2,  // 12: mir.v1.HandshakeSpec.tls_max:type_name -> mir.v1.HandshakeSpec.TlsVersion
+	18, // 13: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
+	21, // 14: mir.v1.TelemetrySnapshot.rx:type_name -> mir.v1.RxClass
+	20, // 15: mir.v1.TelemetrySnapshot.handshake:type_name -> mir.v1.HandshakeStats
+	3,  // 16: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
+	4,  // 17: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
+	13, // 18: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
+	16, // 19: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
+	23, // 20: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
+	24, // 21: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
+	6,  // 22: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
+	17, // 23: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
+	17, // 24: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
+	19, // 25: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
+	22, // 26: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
+	22, // [22:27] is the sub-list for method output_type
+	17, // [17:22] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_dataplane_proto_init() }
@@ -2397,7 +2557,7 @@ func file_dataplane_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_proto_rawDesc), len(file_dataplane_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
