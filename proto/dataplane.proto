@@ -73,7 +73,7 @@ message PortInfo {
 
 message HelloResponse {
   string   dataplane_version = 1;
-  string   node_id           = 2;  // 파드명 (HOSTNAME)
+  string   node_id           = 2;  // 인스턴스명 (HOSTNAME)
   repeated PortInfo ports    = 3;
   repeated uint32   lcores   = 4;  // 실제로 할당받은 CPU 목록 (cpuset 에서 읽은 값)
   uint32   main_lcore        = 5;
@@ -87,11 +87,24 @@ message StartScenarioRequest {
 
   // 리플레이 대상 PCAP. **파일 내용이 아니라 경로만** 전달한다.
   // GB 단위일 수 있으므로 제어 채널로 실어 보내지 않고 공유 볼륨을 경유한다.
-  // 제어부가 RW 로, 데이터플레인이 RO 로 같은 PV 를 마운트한다.
+  // 제어부가 RW 로, 데이터플레인이 RO 로 같은 볼륨을 마운트한다.
   string pcap_path = 2;
 
   uint64 rate_pps   = 3;  // 0 = 최대 속도
   uint32 duration_s = 4;  // 0 = 무한
+
+  // 송신 시작 시각 (CLOCK_REALTIME 기준 ns). 0 = 즉시.
+  //
+  // 장비 여러 대가 **동시에** 송신을 시작해야 하는 시나리오를 위한 것이다.
+  // 제어부가 각 인스턴스에 명령을 뿌리는 데는 왕복 지연이 있으므로, "받는 즉시"
+  // 로는 장비 간 시작 시점이 수 ms 어긋난다. 공통 시각을 지정해 그 편차를 없앤다.
+  //
+  // ★ 이 값은 **장비 간 시계가 동기화돼 있을 때만** 의미가 있다. PTP 가
+  //   전제이고, 텔레메트리의 ts_ns 도 같은 시계를 쓴다 → deploy/host/60-ptp.md
+  //
+  // 송신 엔진 자체는 Phase 2 다. 필드를 지금 잡아 두는 이유는 나중에 넣으면
+  // 두 hop(C ⇄ 사이드카 ⇄ 제어부)의 스키마를 다시 건드려야 하기 때문이다.
+  uint64 start_at_ns = 5;
 }
 
 message StopScenarioRequest {
@@ -159,8 +172,8 @@ message Event {
 // ─────────────────────────────────────────────────────────────
 // hop ④ — 사이드카가 서버, 제어부가 클라이언트.
 //
-// 제어부는 headless Service 의 EndpointSlice 를 watch 해 N 개 사이드카에
-// 자동으로 연결/해제한다.
+// 제어부는 함대 설정(fleet.yaml)에 적힌 주소 집합에 자동으로 연결/해제한다.
+// 장비 경계를 넘으므로 이 hop 은 mTLS 로 보호된다 — control/internal/mtls.
 // ─────────────────────────────────────────────────────────────
 service DataPlane {
   rpc Hello(HelloRequest) returns (HelloResponse);

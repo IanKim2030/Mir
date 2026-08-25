@@ -388,9 +388,22 @@ type StartScenarioRequest struct {
 	// 리플레이 대상 PCAP. **파일 내용이 아니라 경로만** 전달한다.
 	// GB 단위일 수 있으므로 제어 채널로 실어 보내지 않고 공유 볼륨을 경유한다.
 	// 제어부가 RW 로, 데이터플레인이 RO 로 같은 PV 를 마운트한다.
-	PcapPath      string `protobuf:"bytes,2,opt,name=pcap_path,json=pcapPath,proto3" json:"pcap_path,omitempty"`
-	RatePps       uint64 `protobuf:"varint,3,opt,name=rate_pps,json=ratePps,proto3" json:"rate_pps,omitempty"`       // 0 = 최대 속도
-	DurationS     uint32 `protobuf:"varint,4,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"` // 0 = 무한
+	PcapPath  string `protobuf:"bytes,2,opt,name=pcap_path,json=pcapPath,proto3" json:"pcap_path,omitempty"`
+	RatePps   uint64 `protobuf:"varint,3,opt,name=rate_pps,json=ratePps,proto3" json:"rate_pps,omitempty"`       // 0 = 최대 속도
+	DurationS uint32 `protobuf:"varint,4,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"` // 0 = 무한
+	// 송신 시작 시각 (CLOCK_REALTIME 기준 ns). 0 = 즉시.
+	//
+	// 장비 여러 대가 **동시에** 송신을 시작해야 하는 시나리오를 위한 것이다.
+	// 제어부가 각 인스턴스에 명령을 뿌리는 데는 왕복 지연이 있으므로, "받는 즉시"
+	// 로는 장비 간 시작 시점이 수 ms 어긋난다. 공통 시각을 지정해 그 편차를 없앤다.
+	//
+	// ★ 이 값은 **장비 간 시계가 동기화돼 있을 때만** 의미가 있다. PTP 가
+	//
+	//	전제이고, 텔레메트리의 ts_ns 도 같은 시계를 쓴다 → deploy/host/60-ptp.md
+	//
+	// 송신 엔진 자체는 Phase 2 다. 필드를 지금 잡아 두는 이유는 나중에 넣으면
+	// 두 hop(C ⇄ 사이드카 ⇄ 제어부)의 스키마를 다시 건드려야 하기 때문이다.
+	StartAtNs     uint64 `protobuf:"varint,5,opt,name=start_at_ns,json=startAtNs,proto3" json:"start_at_ns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -449,6 +462,13 @@ func (x *StartScenarioRequest) GetRatePps() uint64 {
 func (x *StartScenarioRequest) GetDurationS() uint32 {
 	if x != nil {
 		return x.DurationS
+	}
+	return 0
+}
+
+func (x *StartScenarioRequest) GetStartAtNs() uint64 {
+	if x != nil {
+		return x.StartAtNs
 	}
 	return 0
 }
@@ -922,14 +942,15 @@ const file_dataplane_proto_rawDesc = "" +
 	"\x05ports\x18\x03 \x03(\v2\x10.mir.v1.PortInfoR\x05ports\x12\x16\n" +
 	"\x06lcores\x18\x04 \x03(\rR\x06lcores\x12\x1d\n" +
 	"\n" +
-	"main_lcore\x18\x05 \x01(\rR\tmainLcore\"\x8e\x01\n" +
+	"main_lcore\x18\x05 \x01(\rR\tmainLcore\"\xae\x01\n" +
 	"\x14StartScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\x12\x1b\n" +
 	"\tpcap_path\x18\x02 \x01(\tR\bpcapPath\x12\x19\n" +
 	"\brate_pps\x18\x03 \x01(\x04R\aratePps\x12\x1d\n" +
 	"\n" +
-	"duration_s\x18\x04 \x01(\rR\tdurationS\"6\n" +
+	"duration_s\x18\x04 \x01(\rR\tdurationS\x12\x1e\n" +
+	"\vstart_at_ns\x18\x05 \x01(\x04R\tstartAtNs\"6\n" +
 	"\x13StopScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\"/\n" +
