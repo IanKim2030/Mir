@@ -268,14 +268,42 @@ curl -s localhost:8080/api/dataplanes | jq   # 인스턴스 단위 상세
 
 > ⚠️ **실제로 선로에 프레임이 나간다.** 본인 소유/승인된 링크에서만 할 것.
 
+송신을 켜는 변수는 **인스턴스별**이다(`MIR_DP<i>_HELLO_COUNT`). 전역 스위치를
+두지 않은 이유는 4포트가 한꺼번에 쏘는 사고를 막기 위해서다.
+
 ```bash
-docker compose -f docker-compose.dataplane.yml stop dp0
-MIR_HELLO_TX_COUNT=1000 docker compose -f docker-compose.dataplane.yml up -d dp0
+MIR_DP0_HELLO_COUNT=1000 \
+  docker compose -f docker-compose.dataplane.yml up -d --force-recreate dp0 agent0
+
 docker logs gen-1-dp0 | grep hello
+#   hello 송신: port=0 count=1000 size=64B burst=32 dst=ff:ff:ff:ff:ff:ff
 #   hello 송신 완료: 1000/1000 전송, 0 폐기 (64000 bytes)
 ```
 
-기본값이 0 이라 평소에는 기동만으로 프레임이 나가지 않는다. 검증 후 되돌린다.
+**자기 보고만 믿지 말고 NIC 카운터로 대조한다.** tx_burst 가 mbuf 를 받아
+갔다는 것과 선로에 나갔다는 것은 다른 사실이다.
+
+```bash
+curl -s localhost:8080/api/dataplanes | jq '.[] | {name, tx: .ports[0].stats.txPkts}'
+#   {"name":"gen-1-dp0","tx":1000}   ← 자기 보고와 일치해야 한다
+#   {"name":"gen-1-dp1","tx":0}      ← 나머지는 0 (인스턴스별 게이트 확인)
+```
+
+프레임은 **순수 L2** 다 — `ETH + EtherType 0x88B5 + "MIR1" 매직 + seq +
+타임스탬프`. IP 헤더가 없으므로 대상 IP 를 지정할 수 없다. 특정 장비로만
+보내려면 MAC 을 준다.
+
+```bash
+MIR_HELLO_DST_MAC=aa:bb:cc:dd:ee:ff MIR_DP0_HELLO_COUNT=1000 docker compose ... 
+```
+
+상대 쪽에서 도착을 확인하려면 그 장비에서:
+
+```bash
+sudo tcpdump -i <iface> -e -XX ether proto 0x88B5
+```
+
+미설정이 기본이라 평소에는 기동만으로 프레임이 나가지 않는다. 검증 후 되돌린다.
 
 ### 7단계 — 장비 2대 (멀티 장비 구성일 때만)
 

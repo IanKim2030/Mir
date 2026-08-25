@@ -102,6 +102,25 @@ type portView struct {
 	MAC        string `json:"mac"`
 	NumaNode   int32  `json:"numaNode"`
 	DeviceSpec string `json:"deviceSpec"`
+
+	// NIC 하드웨어 카운터(rte_eth_stats_get). 텔레메트리 스냅샷을 아직 못
+	// 받았으면 nil 이다.
+	//
+	// 이 값이 중요한 이유: 데이터플레인이 "몇 개 보냈다"고 보고하는 것과
+	// **NIC 이 실제로 몇 개 내보냈는지**는 다른 사실이다. tx_burst 가 mbuf 를
+	// 받아 갔어도 선로에 나가지 않을 수 있다. 둘을 대조할 수 있어야 한다.
+	Stats *portStats `json:"stats,omitempty"`
+}
+
+type portStats struct {
+	TxPkts  uint64 `json:"txPkts"`
+	TxBytes uint64 `json:"txBytes"`
+	TxDrop  uint64 `json:"txDrop"`
+	TxErr   uint64 `json:"txErr"`
+	RxPkts  uint64 `json:"rxPkts"`
+	RxBytes uint64 `json:"rxBytes"`
+	RxDrop  uint64 `json:"rxDrop"`
+	RxErr   uint64 `json:"rxErr"`
 }
 
 type instanceView struct {
@@ -205,7 +224,7 @@ func (s *Server) instanceViews() []instanceView {
 		v.Lcores = st.Hello.Lcores
 		v.MainLcore = st.Hello.MainLcore
 		v.DPVersion = st.Hello.DataplaneVersion
-		v.Ports = toPortViews(st.Hello.Ports)
+		v.Ports = toPortViews(st.Hello.Ports, st.Telemetry)
 		if st.Telemetry != nil {
 			v.EventDrop = st.Telemetry.EventDrop
 		}
@@ -248,16 +267,38 @@ func deviceSpecs(ports []portView) []string {
 	return out
 }
 
-func toPortViews(ports []*pb.PortInfo) []portView {
+// toPortViews 는 Hello 의 정적 정보(포트 구성)에 텔레메트리의 동적 카운터를
+// portId 로 맞춰 붙인다. snap 이 nil 이면 카운터 없이 구성만 돌려준다.
+func toPortViews(ports []*pb.PortInfo, snap *pb.TelemetrySnapshot) []portView {
+	byID := map[uint32]*pb.PortStats{}
+	if snap != nil {
+		for _, s := range snap.Ports {
+			byID[s.PortId] = s
+		}
+	}
+
 	out := make([]portView, 0, len(ports))
 	for _, p := range ports {
-		out = append(out, portView{
+		v := portView{
 			PortID:     p.PortId,
 			Driver:     p.Driver,
 			MAC:        p.Mac,
 			NumaNode:   p.NumaNode,
 			DeviceSpec: p.DeviceSpec,
-		})
+		}
+		if s, ok := byID[p.PortId]; ok {
+			v.Stats = &portStats{
+				TxPkts:  s.TxPkts,
+				TxBytes: s.TxBytes,
+				TxDrop:  s.TxDrop,
+				TxErr:   s.TxErr,
+				RxPkts:  s.RxPkts,
+				RxBytes: s.RxBytes,
+				RxDrop:  s.RxDrop,
+				RxErr:   s.RxErr,
+			}
+		}
+		out = append(out, v)
 	}
 	return out
 }

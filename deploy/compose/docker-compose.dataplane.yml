@@ -31,6 +31,19 @@ x-agent: &agent
   network_mode: host
   restart: unless-stopped
 
+x-hello: &hello
+  # Phase 1 검증용 hello packet 송신 설정 (공통 항목).
+  #
+  # ★ 실제로 선로에 프레임이 나간다. 본인 소유/승인된 링크에서만 쓸 것.
+  #
+  # 빈 문자열은 데이터플레인이 "미설정"으로 처리하므로(tx_hello.c 의 env_ulong),
+  # 평소에는 기동만으로 프레임이 나가지 않는다. 송신을 켜는 것은 인스턴스별
+  # MIR_DP<i>_HELLO_COUNT 뿐이다 — 전역 스위치를 두면 4포트가 한꺼번에
+  # 쏘게 되어 의도치 않은 사고가 난다.
+  MIR_HELLO_DST_MAC: ${MIR_HELLO_DST_MAC:-}
+  MIR_HELLO_PKT_SIZE: ${MIR_HELLO_PKT_SIZE:-}
+  MIR_HELLO_BURST: ${MIR_HELLO_BURST:-}
+
 x-agent-tls: &agent-tls
   # 이 포트는 장비 밖으로 열린다. 인증이 없으면 여기 닿는 누구나 라인레이트
   # 송신을 시킬 수 있으므로 mTLS 가 기본이다.
@@ -51,6 +64,8 @@ services:
       # 컨테이너 entrypoint 가 바이너리 직행이라 셸이 HOSTNAME 을 만들어 주지
       # 않는다. EAL --file-prefix 와 텔레메트리 node_id 가 이 값을 쓰므로
       # **함대 설정의 인스턴스 이름과 반드시 같아야 한다**.
+      <<: *hello
+      MIR_HELLO_TX_COUNT: ${MIR_DP0_HELLO_COUNT:-}
       HOSTNAME: ${MIR_MACHINE}-dp0
       MIR_DEVICE_SPEC: pci:${MIR_DP0_PF}
       MIR_MEM_MB: ${MIR_MEM_MB:-4096}
@@ -85,6 +100,8 @@ services:
     container_name: ${MIR_MACHINE}-dp1
     cpuset: ${MIR_DP1_CPUSET}
     environment:
+      <<: *hello
+      MIR_HELLO_TX_COUNT: ${MIR_DP1_HELLO_COUNT:-}
       HOSTNAME: ${MIR_MACHINE}-dp1
       MIR_DEVICE_SPEC: pci:${MIR_DP1_PF}
       MIR_MEM_MB: ${MIR_MEM_MB:-4096}
@@ -118,6 +135,8 @@ services:
     container_name: ${MIR_MACHINE}-dp2
     cpuset: ${MIR_DP2_CPUSET}
     environment:
+      <<: *hello
+      MIR_HELLO_TX_COUNT: ${MIR_DP2_HELLO_COUNT:-}
       HOSTNAME: ${MIR_MACHINE}-dp2
       MIR_DEVICE_SPEC: pci:${MIR_DP2_PF}
       MIR_MEM_MB: ${MIR_MEM_MB:-4096}
@@ -151,6 +170,8 @@ services:
     container_name: ${MIR_MACHINE}-dp3
     cpuset: ${MIR_DP3_CPUSET}
     environment:
+      <<: *hello
+      MIR_HELLO_TX_COUNT: ${MIR_DP3_HELLO_COUNT:-}
       HOSTNAME: ${MIR_MACHINE}-dp3
       MIR_DEVICE_SPEC: pci:${MIR_DP3_PF}
       MIR_MEM_MB: ${MIR_MEM_MB:-4096}
