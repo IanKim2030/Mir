@@ -1,11 +1,11 @@
 // Package registry — 제어부가 N개 데이터플레인 사이드카에 붙어 있는 상태를 관리한다.
 //
-// headless Service 의 EndpointSlice 를 주기적으로 조회해(reconcile) 연결 집합을
-// 맞춘다. 데이터플레인이 리소스 변경으로 롤링 재생성되면 주소가 바뀌는데,
-// 여기서 자동으로 끊고 다시 붙기 때문에 **재시작 후 복구에 별도 처리가 필요 없다**.
+// Resolver 가 알려 주는 주소 집합을 주기적으로 조회해(reconcile) 연결 집합을
+// 맞춘다. 인스턴스가 재시작되면 잠시 끊겼다가 다시 붙는데, 여기서 자동으로
+// 처리하므로 **재시작 후 복구에 별도 처리가 필요 없다**.
 //
-// 지금은 5초 주기 reconcile 이다. informer 로 바꾸면 지연이 즉시로 줄지만,
-// 이 규모에서는 사용자가 체감할 차이가 없어 단순한 쪽을 택했다.
+// 지금은 5초 주기 reconcile 이다. 주소 출처가 정적 설정이라 더 잦게 돌 이유가
+// 없고, 실제 연결 복구는 peer 단위 백오프가 담당한다.
 package registry
 
 import (
@@ -15,11 +15,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
-	discoveryv1 "k8s.io/api/discovery/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"google.golang.org/grpc/credentials"
 
 	"mir/internal/pb"
 )
@@ -30,9 +26,18 @@ const (
 	retryBackoff      = 2 * time.Second
 )
 
+// Resolver 는 "지금 붙어 있어야 할 데이터플레인" 집합을 알려 준다.
+// 반환값은 주소("host:port") → 인스턴스 이름.
+//
+// 이 한 겹이 제어부를 오케스트레이터로부터 떼어 놓는다 — registry 의 나머지
+// (연결·핸드셰이크·스트림·백오프)는 주소가 어디서 왔는지 알 필요가 없다.
+type Resolver interface {
+	Resolve(ctx context.Context) (map[string]string, error)
+}
+
 // Status 는 하나의 데이터플레인에 대한 제어부 측 관측 결과다.
 type Status struct {
-	Pod       string                `json:"pod"`
+	Name      string                `json:"name"`
 	Addr      string                `json:"addr"`
 	Connected bool                  `json:"connected"`
 	Hello     *pb.HelloResponse     `json:"-"`
@@ -41,32 +46,33 @@ type Status struct {
 }
 
 type Registry struct {
-	cs        kubernetes.Interface
-	namespace string
-	service   string
-	port      string
-	version   string
-	log       *slog.Logger
+	resolver Resolver
+	creds    credentials.TransportCredentials
+	version  string
+	log      *slog.Logger
 
 	mu    sync.RWMutex
-	peers map[string]*peer // key = "ip:port"
+	peers map[string]*peer // key = "host:port"
 }
 
-func New(cs kubernetes.Interface, namespace, service, port, version string, log *slog.Logger) *Registry {
+func New(
+	resolver Resolver,
+	creds credentials.TransportCredentials,
+	version string,
+	log *slog.Logger,
+) *Registry {
 	return &Registry{
-		cs:        cs,
-		namespace: namespace,
-		service:   service,
-		port:      port,
-		version:   version,
-		log:       log,
-		peers:     make(map[string]*peer),
+		resolver: resolver,
+		creds:    creds,
+		version:  version,
+		log:      log,
+		peers:    make(map[string]*peer),
 	}
 }
 
 type peer struct {
 	addr   string
-	pod    string
+	name   string
 	cc     *grpc.ClientConn
 	client pb.DataPlaneClient
 	cancel context.CancelFunc
@@ -96,31 +102,10 @@ func (r *Registry) Run(ctx context.Context) {
 }
 
 func (r *Registry) reconcile(ctx context.Context) {
-	slices, err := r.cs.DiscoveryV1().EndpointSlices(r.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: discoveryv1.LabelServiceName + "=" + r.service,
-	})
+	want, err := r.resolver.Resolve(ctx)
 	if err != nil {
-		r.log.Warn("EndpointSlice 조회 실패", "err", err)
+		r.log.Warn("인스턴스 목록 조회 실패", "err", err)
 		return
-	}
-
-	want := map[string]string{} // addr -> pod 이름
-	for i := range slices.Items {
-		for _, ep := range slices.Items[i].Endpoints {
-			// Ready 가 아닌 엔드포인트는 건너뛴다. 사이드카는 C 데이터플레인이
-			// 붙기 전까지 NOT_SERVING 이므로, EAL 초기화 중인 파드에는
-			// 헛되이 연결하지 않게 된다.
-			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
-				continue
-			}
-			pod := ""
-			if ep.TargetRef != nil {
-				pod = ep.TargetRef.Name
-			}
-			for _, addr := range ep.Addresses {
-				want[addr+":"+r.port] = pod
-			}
-		}
 	}
 
 	r.mu.Lock()
@@ -128,31 +113,32 @@ func (r *Registry) reconcile(ctx context.Context) {
 
 	for addr, p := range r.peers {
 		if _, ok := want[addr]; !ok {
-			r.log.Info("데이터플레인 연결 해제", "pod", p.pod, "addr", addr)
+			r.log.Info("데이터플레인 연결 해제", "instance", p.name, "addr", addr)
 			p.close()
 			delete(r.peers, addr)
 		}
 	}
 
-	for addr, pod := range want {
+	for addr, name := range want {
 		if _, ok := r.peers[addr]; ok {
 			continue
 		}
-		p, err := r.dial(ctx, addr, pod)
+		p, err := r.dial(ctx, addr, name)
 		if err != nil {
 			r.log.Warn("데이터플레인 연결 실패", "addr", addr, "err", err)
 			continue
 		}
 		r.peers[addr] = p
-		r.log.Info("데이터플레인 연결 시작", "pod", pod, "addr", addr)
+		r.log.Info("데이터플레인 연결 시작", "instance", name, "addr", addr)
 	}
 }
 
-func (r *Registry) dial(ctx context.Context, addr, pod string) (*peer, error) {
-	// passthrough 를 명시한다. 기본 dns 리졸버는 파드 IP 를 도메인으로
-	// 해석하려 들어 불필요한 조회를 만든다.
+func (r *Registry) dial(ctx context.Context, addr, name string) (*peer, error) {
+	// passthrough 를 명시해 gRPC 단계의 이름 해석을 끈다. 주소 하나가
+	// 백엔드 하나로 고정되는 게 여기서는 정확히 원하는 동작이고, 실제
+	// 호스트명 해석은 다이얼 시점에 net 이 알아서 한다.
 	cc, err := grpc.NewClient("passthrough:///"+addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(r.creds))
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +146,7 @@ func (r *Registry) dial(ctx context.Context, addr, pod string) (*peer, error) {
 	pctx, cancel := context.WithCancel(ctx)
 	p := &peer{
 		addr:   addr,
-		pod:    pod,
+		name:   name,
 		cc:     cc,
 		client: pb.NewDataPlaneClient(cc),
 		cancel: cancel,
@@ -187,7 +173,7 @@ func (r *Registry) List() []Status {
 	for _, p := range r.peers {
 		p.mu.RLock()
 		out = append(out, Status{
-			Pod:       p.pod,
+			Name:      p.name,
 			Addr:      p.addr,
 			Connected: p.connected,
 			Hello:     p.hello,
@@ -199,12 +185,13 @@ func (r *Registry) List() []Status {
 	return out
 }
 
-// ByPod 는 파드 이름으로 색인한 상태를 돌려준다 (k8s 파드 목록과 병합용).
-func (r *Registry) ByPod() map[string]Status {
+// ByName 은 인스턴스 이름으로 색인한 상태를 돌려준다
+// (함대 설정의 기대 인벤토리와 대조할 때 쓴다).
+func (r *Registry) ByName() map[string]Status {
 	out := map[string]Status{}
 	for _, s := range r.List() {
-		if s.Pod != "" {
-			out[s.Pod] = s
+		if s.Name != "" {
+			out[s.Name] = s
 		}
 	}
 	return out
@@ -236,7 +223,7 @@ func (p *peer) handshakeAndStream(ctx context.Context, version string, log *slog
 	cancel()
 	if err != nil {
 		p.setConnected(false)
-		log.Debug("hello 실패", "pod", p.pod, "err", err)
+		log.Debug("hello 실패", "instance", p.name, "err", err)
 		return false
 	}
 
@@ -247,7 +234,7 @@ func (p *peer) handshakeAndStream(ctx context.Context, version string, log *slog
 	p.mu.Unlock()
 
 	log.Info("데이터플레인 준비됨",
-		"pod", p.pod, "ports", len(hello.Ports),
+		"instance", p.name, "ports", len(hello.Ports),
 		"lcores", len(hello.Lcores), "version", hello.DataplaneVersion)
 
 	stream, err := p.client.StreamTelemetry(ctx, &pb.StreamTelemetryRequest{})
@@ -261,7 +248,7 @@ func (p *peer) handshakeAndStream(ctx context.Context, version string, log *slog
 		if err != nil {
 			p.setConnected(false)
 			if ctx.Err() == nil {
-				log.Debug("텔레메트리 스트림 종료", "pod", p.pod, "err", err)
+				log.Debug("텔레메트리 스트림 종료", "instance", p.name, "err", err)
 			}
 			return false
 		}

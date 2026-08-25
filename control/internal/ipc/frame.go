@@ -1,4 +1,4 @@
-// Package ipc — 파드 내부 hop(채널 ③)의 와이어 포맷과 연결 관리.
+// Package ipc — 인스턴스 내부 hop(채널 ③)의 와이어 포맷과 연결 관리.
 //
 // C 데이터플레인의 dataplane/src/ipc_server.c 와 **반드시 일치**해야 한다.
 //
@@ -9,9 +9,9 @@
 //
 //	length = sizeof(type) + len(payload)   — 자기 자신은 제외
 //
-// 이 hop 은 네트워크가 아니라 같은 파드 안의 unix socket 이다. 파티션도 TLS 도
+// 이 hop 은 네트워크가 아니라 같은 장비의 unix socket 이다. 파티션도 TLS 도
 // 없고 두 컨테이너가 생명주기를 공유하므로, 직접 짠 프레이밍이 감당할 만하다.
-// 파드 밖으로 나가는 hop(④)은 gRPC 가 담당한다.
+// 장비 밖으로 나가는 hop(④)은 gRPC 가 담당한다.
 package ipc
 
 import (

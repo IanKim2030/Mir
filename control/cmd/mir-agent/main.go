@@ -1,4 +1,4 @@
-// mir-agent — 데이터플레인 파드의 사이드카 컨테이너.
+// mir-agent — 데이터플레인 인스턴스의 사이드카 컨테이너.
 //
 // C 데이터플레인과 unix socket(③)으로 붙고, 제어부에는 gRPC(④)로 노출한다.
 // 이 프로세스는 공유 풀 코어에서 돌며, 데이터플레인의 배타 코어를 절대
@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"mir/internal/agent"
+	"mir/internal/mtls"
 	"mir/internal/pb"
 )
 
@@ -35,27 +36,40 @@ func main() {
 		nodeID   = env("HOSTNAME", "unknown")
 	)
 
-	log.Info("mir-agent 기동", "sock", sockPath, "listen", listen, "node", nodeID)
+	// 이 포트는 장비 밖으로 열린다(제어부가 다른 장비에 있을 수 있다).
+	// 인증이 없으면 여기 닿는 누구나 라인레이트 송신을 시킬 수 있으므로,
+	// TLS 를 끄려면 MIR_INSECURE=1 을 명시해야 한다.
+	tlsCfg := mtls.FromEnv()
+	creds, err := tlsCfg.ServerCredentials()
+	if err != nil {
+		log.Error("TLS 설정 실패", "err", err)
+		os.Exit(1)
+	}
+
+	log.Info("mir-agent 기동",
+		"sock", sockPath, "listen", listen, "node", nodeID, "tls", tlsCfg.Enabled())
+	if !tlsCfg.Enabled() {
+		log.Warn("평문 제어 채널 — 신뢰할 수 있는 네트워크에서만 쓸 것 (MIR_INSECURE=1)")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	healthSrv := health.NewServer()
-	// 데이터플레인이 붙기 전까지는 NOT_SERVING 이다. readinessProbe 가 이걸
-	// 보고 판단하므로, C 가 EAL 초기화를 마치기 전에는 파드가 Endpoints 에
-	// 들어가지 않는다.
+	// 데이터플레인이 붙기 전까지는 NOT_SERVING 이다. 포트를 실제로 쥐었는지까지
+	// 확인한 뒤에야 SERVING 으로 올라간다 — internal/agent 의 probeReady.
 	healthSrv.SetServingStatus(agent.ServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
 	a := agent.New(sockPath, log, healthSrv)
 	go a.Run(ctx)
 
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpc.Creds(creds))
 	pb.RegisterDataPlaneServer(srv, a)
 	healthpb.RegisterHealthServer(srv, healthSrv)
 
-	// grpcurl 로 붙어 스키마를 조회할 수 있게 한다. 파드 로컬 디버깅에
-	// 결정적으로 유용하고, 이 포트는 클러스터 내부에만 열린다.
+	// grpcurl 로 붙어 스키마를 조회할 수 있게 한다. 로컬 디버깅에 결정적으로
+	// 유용하고, TLS 를 켜 두면 클라이언트 인증서 없이는 조회되지 않는다.
 	reflection.Register(srv)
 
 	lis, err := net.Listen("tcp", listen)

@@ -1,4 +1,4 @@
-// Package agent — 데이터플레인 파드의 사이드카.
+// Package agent — 데이터플레인 인스턴스의 사이드카.
 //
 // 역할은 **릴레이, 그리고 그 이상은 하지 않기**다. 판정도 집계도 제어부가 한다.
 //
@@ -30,8 +30,12 @@ import (
 )
 
 // ServiceName 은 헬스 체크에 등록하는 이름이다. grpc_health_probe 와
-// k8s readinessProbe 가 이 이름을 쓴다.
+// compose 의 healthcheck 가 이 이름을 쓴다.
 const ServiceName = "mir.v1.DataPlane"
+
+// probeVersion 은 사이드카가 스스로 던지는 준비 확인 Hello 의 표식이다.
+// 제어부의 Hello 와 로그에서 구분된다.
+const probeVersion = "agent-probe"
 
 const (
 	dialTimeout = 2 * time.Second
@@ -111,8 +115,15 @@ func (a *Agent) Run(ctx context.Context) {
 		a.setConn(conn)
 		backoff = minBackoff
 
+		// 준비 확인은 readLoop 이 돌고 있어야 응답을 받을 수 있으므로
+		// 별도 고루틴에서 한다. 연결 단위로 취소해 이전 연결의 확인이
+		// 다음 연결의 상태를 건드리지 못하게 묶는다.
+		connCtx, cancelConn := context.WithCancel(ctx)
+		go a.probeReady(connCtx)
+
 		a.readLoop(ctx, conn)
 
+		cancelConn()
 		a.setConn(nil)
 		_ = conn.Close()
 		if ctx.Err() == nil {
@@ -126,14 +137,63 @@ func (a *Agent) setConn(c *ipc.Conn) {
 	a.conn = c
 	a.mu.Unlock()
 
-	// 데이터플레인이 붙기 전에는 NOT_SERVING 이어야 한다. 그래야 k8s 가
-	// 이 파드를 Endpoints 에 넣지 않고, 제어부가 헛되이 연결하지 않는다.
+	// 연결이 끊기면 즉시 NOT_SERVING. 반대로 **연결만으로 SERVING 이 되지는
+	// 않는다** — 포트를 실제로 쥐었는지는 probeReady 가 확인한다.
+	if c == nil {
+		a.setServing(false)
+	}
+}
+
+func (a *Agent) setServing(ok bool) {
 	st := healthpb.HealthCheckResponse_NOT_SERVING
-	if c != nil {
+	if ok {
 		st = healthpb.HealthCheckResponse_SERVING
 	}
 	a.health.SetServingStatus(ServiceName, st)
 	a.health.SetServingStatus("", st)
+}
+
+// probeReady 는 연결 직후 스스로 Hello 를 던져 데이터플레인이 포트를 실제로
+// 쥐었는지 확인한 뒤에만 SERVING 으로 올린다.
+//
+// 소켓이 붙었다는 건 C 프로세스가 살아 있다는 뜻일 뿐이다. main.c 는 포트를
+// 하나도 못 잡아도 경고만 남기고 계속 도는 설계라(설정 실수를 조용히 넘기지
+// 않으려고 일부러 그렇게 뒀다), 여기서 거르지 않으면 BDF 를 잘못 준 인스턴스가
+// "정상"으로 보고되고 제어부가 트래픽을 낼 수 없는 곳에 시나리오를 배정한다.
+func (a *Agent) probeReady(ctx context.Context) {
+	backoff := minBackoff
+
+	for ctx.Err() == nil {
+		hctx, cancel := context.WithTimeout(ctx, callTimeout)
+		resp, err := a.Hello(hctx, &pb.HelloRequest{ControlVersion: probeVersion})
+		cancel()
+
+		if err == nil {
+			// 포트 집합은 rte_eal_init 시점에 확정되고 나중에 늘지 않는다.
+			// 그래서 0개는 재시도할 값이 아니라 그대로 실패다.
+			if len(resp.Ports) == 0 {
+				a.log.Error("데이터플레인이 포트를 하나도 잡지 못했다 — NOT_SERVING 유지",
+					"hint", "vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것")
+				return
+			}
+
+			a.log.Info("데이터플레인 준비 확인",
+				"ports", len(resp.Ports),
+				"lcores", len(resp.Lcores),
+				"version", resp.DataplaneVersion)
+			a.setServing(true)
+			return
+		}
+
+		a.log.Debug("준비 확인 실패 — 재시도", "err", err)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 func (a *Agent) readLoop(ctx context.Context, conn *ipc.Conn) {
