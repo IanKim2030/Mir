@@ -7,7 +7,7 @@
  * 속도 제어·다중 lcore·L3/L4 헤더 빌더는 Phase 2 다.
  *
  * 기동 순서:
- *   1. cpuset·device plugin 환경변수에서 EAL 인자를 조립      (eal_args.c)
+ *   1. cpuset·환경변수에서 EAL 인자를 조립                    (eal_args.c)
  *   2. rte_eal_init
  *   3. 포트 probe 결과 출력
  *   4. 포트 구성·start·링크 확인                             (port.c)
@@ -17,7 +17,10 @@
  *
  * 포트 구성이나 hello 송신이 실패해도 프로세스는 죽지 않는다. 제어 채널이
  * 살아 있어야 운영자가 hello response 로 상태를 확인할 수 있고, 기동 실패로
- * 파드가 CrashLoopBackOff 에 빠지면 그 진단 경로마저 사라진다.
+ * 컨테이너가 재시작 루프에 빠지면 그 진단 경로마저 사라진다.
+ *
+ * 대신 "살아 있음"이 "정상"으로 오해되지 않도록, 포트를 하나도 못 잡으면
+ * 사이드카가 health 를 NOT_SERVING 으로 유지한다 (internal/agent).
  */
 #define _GNU_SOURCE
 
@@ -32,6 +35,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <rte_dev.h>
 #include <rte_eal.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
@@ -130,7 +134,13 @@ static size_t probe_ports(mir_port_info *out, size_t max, const eal_args *args)
         snprintf(p->driver, sizeof(p->driver), "%s",
                  info.driver_name ? info.driver_name : "?");
         format_mac(p->mac, sizeof(p->mac), &mac);
-        snprintf(p->device_spec, sizeof(p->device_spec), "%s", args->dev.value);
+        /* **요청한** BDF 가 아니라 EAL 이 실제로 붙인 장치 이름을 싣는다.
+         * 요청값을 되돌려주면 제어부의 "기대 vs 실측" 대조가 설정을 설정과
+         * 비교하는 꼴이 되어 아무것도 검증하지 못한다. PCI 장치면 이 값이
+         * BDF 문자열("0000:43:00.0")이다. */
+        const char *devname = info.device ? rte_dev_name(info.device) : NULL;
+        snprintf(p->device_spec, sizeof(p->device_spec), "%s",
+                 devname && *devname ? devname : args->dev.value);
 
         LOG(INFO, "port %u: driver=%s mac=%s numa=%d rxq_max=%u txq_max=%u",
             p->port_id, p->driver, p->mac, p->numa_node,
@@ -218,6 +228,26 @@ int main(void)
            device_spec_kind_str(args.dev.kind),
            args.dev.value[0] ? args.dev.value : "(없음)");
     printf("  file-prefix : %s\n", args.file_prefix);
+
+    if (args.mem_mb > 0) {
+        printf("  memory      : %u MB", args.mem_mb);
+        if (args.n_sockets > 0) {
+            printf("  (NUMA 노드 %u개 중 ", args.n_sockets);
+            for (unsigned n = 0, first = 1; n < args.n_sockets; n++) {
+                if (!args.socket_local[n])
+                    continue;
+                printf("%snode%u", first ? "" : ",", n);
+                first = 0;
+            }
+            printf(" 에 배정)");
+        } else {
+            printf("  (NUMA 정보 없음 — 총량으로 지정)");
+        }
+        printf("\n");
+    } else {
+        printf("  memory      : 상한 없음 (MIR_MEM_MB 미설정)\n");
+    }
+
     printf("  EAL argv    :");
     for (int i = 0; i < args.argc; i++)
         printf(" %s", args.argv[i]);
@@ -225,8 +255,15 @@ int main(void)
 
     if (args.dev.kind == DEVICE_SPEC_NONE)
         fprintf(stderr,
-                "경고: 장치가 지정되지 않았다. device plugin 이 PCIDEVICE_* 를 "
-                "주입했는지, 또는 MIR_DEVICE_SPEC 를 설정했는지 확인할 것.\n");
+                "경고: 장치가 지정되지 않았다. MIR_DEVICE_SPEC 를 설정했는지 "
+                "확인할 것 (예: MIR_DEVICE_SPEC=pci:0000:43:00.0).\n");
+
+    /* 인스턴스를 여러 개 띄우는데 상한이 없으면 먼저 뜬 쪽이 hugepage 를
+     * 전부 가져가고 나머지가 기동에 실패한다. 조용히 넘기지 않는다. */
+    if (args.mem_mb == 0)
+        fprintf(stderr,
+                "경고: MIR_MEM_MB 가 없어 hugepage 상한이 걸리지 않았다. "
+                "한 장비에 인스턴스를 여러 개 띄운다면 반드시 설정할 것.\n");
 
     /* ── 2. EAL 초기화 ────────────────────────────────────────── */
     int consumed = rte_eal_init(args.argc, args.argv);
@@ -235,6 +272,9 @@ int main(void)
         fprintf(stderr,
                 "  흔한 원인: hugepage 부족 / IOMMU 그룹 not viable / "
                 "vfio 장치 미마운트\n");
+        fprintf(stderr,
+                "  MIR_MEM_MB 를 썼다면 그 값 × 인스턴스 수가 호스트 hugepage "
+                "총량을 넘지 않는지 확인할 것.\n");
         eal_args_free(&args);
         return 1;
     }
@@ -249,7 +289,7 @@ int main(void)
 
     if (n_ports == 0)
         LOG(WARNING,
-            "인식된 포트가 0개다. vfio 바인딩과 device plugin 할당을 확인할 것");
+            "인식된 포트가 0개다. vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것");
     else
         LOG(INFO, "포트 %zu개 인식", n_ports);
 

@@ -349,7 +349,7 @@ static int listen_socket(const char *path)
     }
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-    /* 파드가 재시작하면 emptyDir 에 예전 소켓 파일이 남아 bind 가 실패한다. */
+    /* 컨테이너가 재시작하면 공유 볼륨에 예전 소켓 파일이 남아 bind 가 실패한다. */
     unlink(path);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
@@ -358,8 +358,8 @@ static int listen_socket(const char *path)
         return -1;
     }
 
-    /* 사이드카가 다른 UID 로 돌 수 있다. 이 소켓은 파드 로컬 emptyDir 안에만
-     * 존재하고 파드 밖에서는 도달할 수 없으므로 0666 이어도 노출이 없다. */
+    /* 사이드카가 다른 UID 로 돌 수 있다. 이 소켓은 컨테이너 쌍이 공유하는 볼륨 안에만
+     * 존재하고 컨테이너 밖에서는 도달할 수 없으므로 0666 이어도 노출이 없다. */
     if (chmod(path, 0666) != 0)
         LOG(WARNING, "chmod(%s) 실패: %s", path, strerror(errno));
 

@@ -1,5 +1,5 @@
 /*
- * ipc_server — 파드 내부 hop (채널 ③): C 데이터플레인 ⇄ Go 사이드카.
+ * ipc_server — 인스턴스 내부 hop (채널 ③): C 데이터플레인 ⇄ Go 사이드카.
  *
  * unix socket 위에 4바이트 length-prefix 프레이밍을 얹고 payload 는
  * protobuf-c 로 인코딩한다. 와이어 포맷은 proto/dataplane.proto 주석과
@@ -47,7 +47,7 @@ typedef struct {
  */
 typedef struct {
     const char          *sock_path;
-    const char          *node_id;     /* 파드명 */
+    const char          *node_id;     /* 인스턴스명 */
     const char          *version;
     const mir_port_info *ports;
     size_t               n_ports;
