@@ -29,7 +29,12 @@ else
     info "hugepage: ${hp_total}개 × ${hp_size}"
 fi
 
-if ls /dev/vfio/ 2>/dev/null | grep -qv '^vfio$'; then
+# 주의: `cmd | grep -q` 를 쓰지 않는다. grep -q 는 첫 매칭에서 즉시 끝나는데,
+# 그때 앞 명령이 아직 쓰고 있으면 SIGPIPE 로 죽고 set -o pipefail 이 그걸
+# 파이프라인 실패로 판정한다. **패턴이 맞을 때만 실패하는** 형태라 더 나쁘다.
+# 출력을 변수에 받아 here-string 으로 넘기면 파이프가 없어져 문제가 사라진다.
+vfio_entries=$(ls /dev/vfio/ 2>/dev/null || true)
+if grep -qv '^vfio$' <<<"$vfio_entries" && [[ -n "$vfio_entries" ]]; then
     info "vfio 그룹: $(ls /dev/vfio/ | grep -v '^vfio$' | tr '\n' ' ')"
 else
     warn "/dev/vfio 에 IOMMU 그룹이 없다 — 20-bind-vfio.sh 를 먼저 실행할 것"

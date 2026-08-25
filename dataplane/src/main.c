@@ -212,6 +212,12 @@ int main(void)
     eal_args args;
     char     err[256] = {0};
 
+    /* 컨테이너 로그로 나갈 때 stdout 은 블록 버퍼링이 된다. 그러면 아래
+     * 진단 배너가 EAL 의 stderr 출력보다 **뒤에** 찍히고, 기동에 실패해
+     * 프로세스가 죽으면 버퍼째 유실된다. 기동 실패를 진단하는 1차 자료가
+     * 바로 이 배너라 그걸 잃으면 안 된다. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     printf("mir-dataplane %s\n", MIR_VERSION);
 
     /* ── 1. EAL 인자 조립 ─────────────────────────────────────── */

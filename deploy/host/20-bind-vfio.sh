@@ -6,7 +6,7 @@
 #   sudo ./20-bind-vfio.sh 0000:3b:00.0 0000:3b:00.1
 #   sudo ./20-bind-vfio.sh --force 0000:3b:00.0  # 안전장치 무시
 #
-# driverctl 이 있으면 재부팅 후에도 유지되도록 override 를 등록한다.
+# 바인딩한 BDF 목록과 oneshot systemd 유닛을 설치해 재부팅 후에도 유지한다.
 #
 set -euo pipefail
 
@@ -57,7 +57,12 @@ fi
 echo "== 사전 점검 =="
 
 NOIOMMU=0
-if dmesg 2>/dev/null | grep -qi "DMAR: IOMMU enabled"; then
+# 주의: `cmd | grep -q` 를 쓰지 않는다. grep -q 는 첫 매칭에서 즉시 끝나는데,
+# 그때 앞 명령이 아직 쓰고 있으면 SIGPIPE 로 죽고 set -o pipefail 이 그걸
+# 파이프라인 실패로 판정한다. **패턴이 맞을 때만 실패하는** 형태라 더 나쁘다.
+# 출력을 변수에 받아 here-string 으로 넘기면 파이프가 없어져 문제가 사라진다.
+dmesg_out=$(dmesg 2>/dev/null || true)
+if grep -qi "DMAR: IOMMU enabled" <<<"$dmesg_out"; then
     info "IOMMU: 활성 (vfio-pci 정상 모드 — 비특권 파드 가능)"
 elif [[ -n "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]]; then
     info "IOMMU: 그룹 존재 (활성으로 간주)"
@@ -105,7 +110,8 @@ for bdf in "${BDFS[@]}"; do
         if [[ "$netdev" == "$MGMT_NETDEV" && $FORCE -eq 0 ]]; then
             die "$bdf ($netdev) 는 기본 경로를 가진 관리용 인터페이스다. 바인딩하면 접속이 끊긴다. 정말 넘기려면 --force"
         fi
-        if ip -o addr show dev "$netdev" 2>/dev/null | grep -q "inet "; then
+        addr_out=$(ip -o addr show dev "$netdev" 2>/dev/null || true)
+        if grep -q "inet " <<<"$addr_out"; then
             warn "$netdev 에 IP가 설정되어 있다 — 바인딩하면 해제된다"
         fi
         info "현재 netdev: $netdev (드라이버 $cur_drv)"
@@ -147,16 +153,96 @@ for bdf in "${BDFS[@]}"; do
     [[ "$new_drv" == "vfio-pci" ]] || die "$bdf 바인딩 실패 (현재 드라이버: $new_drv)"
     info "vfio-pci 바인딩 완료"
 
-    # 재부팅 후 유지
-    if command -v driverctl >/dev/null 2>&1; then
-        driverctl set-override "$bdf" vfio-pci
-        info "driverctl override 등록 — 재부팅 후에도 유지됨"
-    else
-        warn "driverctl 미설치 — 이 바인딩은 재부팅 시 사라진다"
-        warn "  sudo apt install driverctl  후 이 스크립트를 다시 실행할 것"
-    fi
     echo
 done
+
+# ─────────────────────────────────────────────────────────────
+# 재부팅 후 유지
+#
+# driverctl 을 쓰지 않는다. Ubuntu 26.04 의 0.115-2build1 은 패키징이 깨져
+# driverctl@.service 와 udev 규칙이 파일시스템 루트(/driverctl@.service,
+# /rules.d/)에 설치된다 — systemd 도 udev 도 그걸 보지 못해 override 가
+# 저장은 되지만 부팅 때 적용되지 않는다. 실장비에서 재부팅 후 4포트가 전부
+# i40e 로 돌아가는 것으로 확인했다.
+#
+# 대신 BDF 목록과 oneshot 유닛을 직접 둔다. vendor:device ID 로 잡는
+# (options vfio-pci ids=...) 방식보다 정확하다 — 같은 모델 카드가 더 꽂혀도
+# 여기 적힌 것만 넘어간다. PF↔인스턴스를 BDF 로 고정하는 이 프로젝트의
+# 설계와도 일치한다.
+# ─────────────────────────────────────────────────────────────
+BDF_LIST=/etc/mir/vfio-bdfs
+HELPER=/usr/local/sbin/mir-vfio-bind
+UNIT=/etc/systemd/system/mir-vfio-bind.service
+
+echo "== 재부팅 후 유지 설정 =="
+
+mkdir -p /etc/mir
+printf '%s\n' "${BDFS[@]}" > "$BDF_LIST"
+info "$BDF_LIST 기록 (${#BDFS[@]}개)"
+
+cat > "$HELPER" <<'HELPER_EOF'
+#!/usr/bin/env bash
+# 부팅 시 지정된 BDF 를 vfio-pci 로 바인딩한다. 20-bind-vfio.sh 가 설치한다.
+#
+# 목록(/etc/mir/vfio-bdfs)은 20-bind-vfio.sh 가 관리용 인터페이스 보호를
+# 통과시킨 것만 기록한다. 여기서는 그 목록을 그대로 신뢰한다 — 부팅 초기에는
+# 기본 경로가 아직 없어 같은 검사를 다시 할 수 없다.
+set -u
+LIST=/etc/mir/vfio-bdfs
+[[ -r "$LIST" ]] || exit 0
+
+modprobe vfio-pci || exit 1
+
+while read -r bdf; do
+    [[ -n "$bdf" ]] || continue
+    dev="/sys/bus/pci/devices/$bdf"
+    [[ -d "$dev" ]] || { echo "mir-vfio-bind: $bdf 없음 — 건너뜀"; continue; }
+
+    cur=""
+    [[ -e "$dev/driver" ]] && cur=$(basename "$(readlink -f "$dev/driver")")
+    [[ "$cur" == "vfio-pci" ]] && continue
+
+    [[ -n "$cur" ]] && echo "$bdf" > "$dev/driver/unbind" 2>/dev/null
+    echo "vfio-pci" > "$dev/driver_override"
+    echo "$bdf" > /sys/bus/pci/drivers_probe 2>/dev/null
+
+    new=""
+    [[ -e "$dev/driver" ]] && new=$(basename "$(readlink -f "$dev/driver")")
+    if [[ "$new" == "vfio-pci" ]]; then
+        echo "mir-vfio-bind: $bdf → vfio-pci"
+    else
+        echo "mir-vfio-bind: $bdf 바인딩 실패 (현재 ${new:--})" >&2
+    fi
+done < "$LIST"
+HELPER_EOF
+chmod 755 "$HELPER"
+info "$HELPER 설치"
+
+cat > "$UNIT" <<'UNIT_EOF'
+[Unit]
+Description=Bind Mir dataplane NICs to vfio-pci
+Documentation=file:///etc/mir/vfio-bdfs
+# 네트워크 설정보다 먼저 끝나야 한다. 나중에 하면 커널 드라이버가 이미
+# netdev 를 올려 두어 unbind 하는 모양이 되고, 그 사이 설정이 적용된다.
+After=systemd-modules-load.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mir-vfio-bind
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+info "$UNIT 설치"
+
+systemctl daemon-reload
+systemctl enable mir-vfio-bind.service >/dev/null 2>&1 \
+    && info "mir-vfio-bind.service 활성화 — 재부팅 후에도 유지된다" \
+    || warn "유닛 활성화 실패 — 재부팅 시 바인딩이 사라진다"
+echo
 
 # ─────────────────────────────────────────────────────────────
 # 결과

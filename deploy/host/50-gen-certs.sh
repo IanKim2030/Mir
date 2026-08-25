@@ -86,6 +86,26 @@ echo "== 제어부 인증서 =="
 issue "control" "mir-control" "mir-control"
 
 chmod 600 ./*.key
+
+# ── 컨테이너가 읽을 수 있게 소유자를 맞춘다 ──────────────────
+#
+# 사이드카와 제어부 이미지는 distroless 의 nonroot(65532)로 돈다. 키를 600 으로
+# 두고 발급자(보통 uid 1000) 소유로 남기면 컨테이너가 열지 못해
+# "permission denied" 로 기동에 실패한다. 실장비에서 실제로 겪은 문제다.
+#
+# 644 로 여는 것은 답이 아니다 — 개인키를 누구나 읽게 만든다.
+CONTAINER_UID=65532
+
+if [[ $EUID -eq 0 ]]; then
+    chown "$CONTAINER_UID:$CONTAINER_UID" ./*.key ./*.crt
+    echo "  키/인증서 소유자를 $CONTAINER_UID (컨테이너 nonroot)로 설정"
+else
+    echo
+    echo "★ 이 파일들은 발급자 소유라 컨테이너(uid $CONTAINER_UID)가 읽지 못한다."
+    echo "  배치한 뒤 반드시 실행할 것:"
+    echo "    sudo chown $CONTAINER_UID:$CONTAINER_UID <배치경로>/*.key <배치경로>/*.crt"
+fi
+
 echo
 echo "== 배포 =="
 echo "  각 생성 장비:  ca.crt + agent-<주소>.{crt,key}"

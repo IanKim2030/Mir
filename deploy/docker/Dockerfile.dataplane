@@ -82,11 +82,16 @@ RUN printf 'dpdk=%s\nmarch=%s\nbuilt=%s\n' \
 FROM ubuntu:${UBUNTU_VERSION}
 
 # libnuma1     : DPDK 필수
+# libatomic1   : PMD(.so)들이 링크한다. **메인 바이너리는 요구하지 않아** ldd 로
+#                mir-dataplane 만 봐서는 놓친다. 없으면 EAL 이 플러그인을
+#                dlopen 하지 못하고 "Cannot init plugins" → rte_eal_init 실패로
+#                끝난다. 실장비에서 실제로 겪은 문제다.
 # libprotobuf-c1: 채널 ③ 인코딩
 # python3-minimal: dpdk-devbind.py 실행용. 컨테이너 안에서 장치 상태를 못 보면
 #                  vfio 문제 디버깅이 매우 괴로워진다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libnuma1 \
+        libatomic1 \
         libprotobuf-c1 \
         python3-minimal \
     && rm -rf /var/lib/apt/lists/*

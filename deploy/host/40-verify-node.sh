@@ -19,7 +19,10 @@ sec() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 # ─────────────────────────────────────────────────────────────
 sec "1. 커널 / IOMMU"
 
-if dmesg 2>/dev/null | grep -qi "DMAR: IOMMU enabled"; then
+# `dmesg | grep -q` 를 쓰지 않는 이유는 아래 vfio 절의 주석 참조 —
+# pipefail 과 겹치면 패턴이 맞을 때만 실패한다.
+dmesg_out=$(dmesg 2>/dev/null || true)
+if grep -qi "DMAR: IOMMU enabled" <<<"$dmesg_out"; then
     ok "IOMMU 활성" "비특권 파드 가능"
 elif [[ -n "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]]; then
     ok "IOMMU 그룹 존재" "$(ls /sys/kernel/iommu_groups | wc -l)개"
@@ -70,9 +73,16 @@ mountpoint -q /dev/hugepages 2>/dev/null \
 # ─────────────────────────────────────────────────────────────
 sec "3. vfio-pci 바인딩"
 
-lsmod 2>/dev/null | grep -q '^vfio_pci' \
-    && ok  "vfio-pci 모듈 로드됨" \
-    || bad "vfio-pci 모듈 없음" "modprobe vfio-pci"
+# lsmod 가 아니라 sysfs 를 본다. 두 가지 이유가 있다.
+#
+#  1. vfio-pci 가 커널에 내장(=y)된 빌드에서는 lsmod 에 아무것도 안 잡히지만
+#     바인딩은 정상 동작한다. 실제로 알고 싶은 것은 "모듈이 올라왔는가"가
+#     아니라 "이 드라이버로 바인딩할 수 있는가"다.
+#  2. `lsmod | grep -q` 는 set -o pipefail 과 함께 쓰면 **매칭될 때만** 실패한다
+#     (grep -q 가 먼저 끝나 lsmod 가 SIGPIPE 를 받는다). 파이프를 없애면 사라진다.
+[[ -d /sys/bus/pci/drivers/vfio-pci ]] \
+    && ok  "vfio-pci 드라이버 사용 가능" \
+    || bad "vfio-pci 드라이버 없음" "modprobe vfio-pci"
 
 groups=$(ls /dev/vfio/ 2>/dev/null | grep -v '^vfio$' || true)
 [[ -n "$groups" ]] \
