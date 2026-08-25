@@ -174,7 +174,7 @@ func (x HandshakeSpec_Action) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HandshakeSpec_Action.Descriptor instead.
 func (HandshakeSpec_Action) EnumDescriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{10, 0}
+	return file_dataplane_proto_rawDescGZIP(), []int{11, 0}
 }
 
 type Event_Kind int32
@@ -235,7 +235,7 @@ func (x Event_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Event_Kind.Descriptor instead.
 func (Event_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{17, 0}
+	return file_dataplane_proto_rawDescGZIP(), []int{18, 0}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1037,7 +1037,10 @@ type StartScenarioRequest struct {
 	//
 	// Mode A(무상태 블라스트)와 근본적으로 다르다. 상태를 들고 SYN→SYN-ACK→행동
 	// 피드백 루프를 돌리므로 라인레이트가 아니라 **세션 수 제한**이다.
-	Handshake     *HandshakeSpec `protobuf:"bytes,8,opt,name=handshake,proto3" json:"handshake,omitempty"`
+	Handshake *HandshakeSpec `protobuf:"bytes,8,opt,name=handshake,proto3" json:"handshake,omitempty"`
+	// 모드 C — PCAP 리플레이 (Phase 4-1). pcap_path 와 함께 쓴다.
+	// pcap_path 가 설정돼 있으면 packet/handshake 는 무시된다.
+	Replay        *ReplayOpts `protobuf:"bytes,9,opt,name=replay,proto3" json:"replay,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1128,6 +1131,102 @@ func (x *StartScenarioRequest) GetHandshake() *HandshakeSpec {
 	return nil
 }
 
+func (x *StartScenarioRequest) GetReplay() *ReplayOpts {
+	if x != nil {
+		return x.Replay
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────
+// 모드 C — PCAP 리플레이 옵션 (Phase 4-1)
+//
+// pcap_path 가 가리키는 파일(공유 볼륨)을 그대로 선로에 재생한다. 파일 내용은
+// 제어 채널을 타지 않는다 — 경로만 명령으로 전달된다(StartScenarioRequest 주석).
+// Ethernet 링크타입 프레임만 재생하고, 그 외는 건너뛴다.
+// ─────────────────────────────────────────────────────────────
+type ReplayOpts struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 원본 패킷 간 간격을 유지한다. false 면 NIC 이 받는 대로 최대 속도.
+	PreserveTiming bool `protobuf:"varint,1,opt,name=preserve_timing,json=preserveTiming,proto3" json:"preserve_timing,omitempty"`
+	// preserve_timing 일 때 배속. 0 또는 1 = 원속, 2 = 두 배 빠르게. SPB 처럼
+	// 타임스탬프가 없는 레코드가 섞이면 그 구간은 최대 속도로 나간다.
+	Speed float64 `protobuf:"fixed64,2,opt,name=speed,proto3" json:"speed,omitempty"`
+	// 반복 횟수. 0 = 1회.
+	Loop uint32 `protobuf:"varint,3,opt,name=loop,proto3" json:"loop,omitempty"`
+	// 구간 재전송 (0-based). first_pkt 부터 last_pkt 까지.
+	// last_pkt = 0 이면 끝까지. 큰 캡처를 나눠 보낼 때 쓴다.
+	FirstPkt      uint32 `protobuf:"varint,4,opt,name=first_pkt,json=firstPkt,proto3" json:"first_pkt,omitempty"`
+	LastPkt       uint32 `protobuf:"varint,5,opt,name=last_pkt,json=lastPkt,proto3" json:"last_pkt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplayOpts) Reset() {
+	*x = ReplayOpts{}
+	mi := &file_dataplane_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplayOpts) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplayOpts) ProtoMessage() {}
+
+func (x *ReplayOpts) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplayOpts.ProtoReflect.Descriptor instead.
+func (*ReplayOpts) Descriptor() ([]byte, []int) {
+	return file_dataplane_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ReplayOpts) GetPreserveTiming() bool {
+	if x != nil {
+		return x.PreserveTiming
+	}
+	return false
+}
+
+func (x *ReplayOpts) GetSpeed() float64 {
+	if x != nil {
+		return x.Speed
+	}
+	return 0
+}
+
+func (x *ReplayOpts) GetLoop() uint32 {
+	if x != nil {
+		return x.Loop
+	}
+	return 0
+}
+
+func (x *ReplayOpts) GetFirstPkt() uint32 {
+	if x != nil {
+		return x.FirstPkt
+	}
+	return 0
+}
+
+func (x *ReplayOpts) GetLastPkt() uint32 {
+	if x != nil {
+		return x.LastPkt
+	}
+	return 0
+}
+
 // ─────────────────────────────────────────────────────────────
 // 모드 B — handshake 제어 명세 (Phase 4)
 //
@@ -1157,7 +1256,7 @@ type HandshakeSpec struct {
 
 func (x *HandshakeSpec) Reset() {
 	*x = HandshakeSpec{}
-	mi := &file_dataplane_proto_msgTypes[10]
+	mi := &file_dataplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1169,7 +1268,7 @@ func (x *HandshakeSpec) String() string {
 func (*HandshakeSpec) ProtoMessage() {}
 
 func (x *HandshakeSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[10]
+	mi := &file_dataplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1182,7 +1281,7 @@ func (x *HandshakeSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeSpec.ProtoReflect.Descriptor instead.
 func (*HandshakeSpec) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *HandshakeSpec) GetEth() *EthSpec {
@@ -1250,7 +1349,7 @@ type StopScenarioRequest struct {
 
 func (x *StopScenarioRequest) Reset() {
 	*x = StopScenarioRequest{}
-	mi := &file_dataplane_proto_msgTypes[11]
+	mi := &file_dataplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1262,7 +1361,7 @@ func (x *StopScenarioRequest) String() string {
 func (*StopScenarioRequest) ProtoMessage() {}
 
 func (x *StopScenarioRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[11]
+	mi := &file_dataplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1275,7 +1374,7 @@ func (x *StopScenarioRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopScenarioRequest.ProtoReflect.Descriptor instead.
 func (*StopScenarioRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{11}
+	return file_dataplane_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StopScenarioRequest) GetScenarioId() string {
@@ -1295,7 +1394,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_dataplane_proto_msgTypes[12]
+	mi := &file_dataplane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1307,7 +1406,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[12]
+	mi := &file_dataplane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1320,7 +1419,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{12}
+	return file_dataplane_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Ack) GetOk() bool {
@@ -1361,7 +1460,7 @@ type PortStats struct {
 
 func (x *PortStats) Reset() {
 	*x = PortStats{}
-	mi := &file_dataplane_proto_msgTypes[13]
+	mi := &file_dataplane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1373,7 +1472,7 @@ func (x *PortStats) String() string {
 func (*PortStats) ProtoMessage() {}
 
 func (x *PortStats) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[13]
+	mi := &file_dataplane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1386,7 +1485,7 @@ func (x *PortStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortStats.ProtoReflect.Descriptor instead.
 func (*PortStats) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{13}
+	return file_dataplane_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PortStats) GetPortId() uint32 {
@@ -1485,7 +1584,7 @@ type TelemetrySnapshot struct {
 
 func (x *TelemetrySnapshot) Reset() {
 	*x = TelemetrySnapshot{}
-	mi := &file_dataplane_proto_msgTypes[14]
+	mi := &file_dataplane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1497,7 +1596,7 @@ func (x *TelemetrySnapshot) String() string {
 func (*TelemetrySnapshot) ProtoMessage() {}
 
 func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[14]
+	mi := &file_dataplane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1510,7 +1609,7 @@ func (x *TelemetrySnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetrySnapshot.ProtoReflect.Descriptor instead.
 func (*TelemetrySnapshot) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{14}
+	return file_dataplane_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TelemetrySnapshot) GetTsNs() uint64 {
@@ -1601,7 +1700,7 @@ type HandshakeStats struct {
 
 func (x *HandshakeStats) Reset() {
 	*x = HandshakeStats{}
-	mi := &file_dataplane_proto_msgTypes[15]
+	mi := &file_dataplane_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1613,7 +1712,7 @@ func (x *HandshakeStats) String() string {
 func (*HandshakeStats) ProtoMessage() {}
 
 func (x *HandshakeStats) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[15]
+	mi := &file_dataplane_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1626,7 +1725,7 @@ func (x *HandshakeStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeStats.ProtoReflect.Descriptor instead.
 func (*HandshakeStats) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{15}
+	return file_dataplane_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *HandshakeStats) GetSessions() uint32 {
@@ -1713,7 +1812,7 @@ type RxClass struct {
 
 func (x *RxClass) Reset() {
 	*x = RxClass{}
-	mi := &file_dataplane_proto_msgTypes[16]
+	mi := &file_dataplane_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1725,7 +1824,7 @@ func (x *RxClass) String() string {
 func (*RxClass) ProtoMessage() {}
 
 func (x *RxClass) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[16]
+	mi := &file_dataplane_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1738,7 +1837,7 @@ func (x *RxClass) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RxClass.ProtoReflect.Descriptor instead.
 func (*RxClass) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{16}
+	return file_dataplane_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RxClass) GetTcpSyn() uint64 {
@@ -1815,7 +1914,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_dataplane_proto_msgTypes[17]
+	mi := &file_dataplane_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1827,7 +1926,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[17]
+	mi := &file_dataplane_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1840,7 +1939,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{17}
+	return file_dataplane_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Event) GetTsNs() uint64 {
@@ -1893,7 +1992,7 @@ type StreamTelemetryRequest struct {
 
 func (x *StreamTelemetryRequest) Reset() {
 	*x = StreamTelemetryRequest{}
-	mi := &file_dataplane_proto_msgTypes[18]
+	mi := &file_dataplane_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1905,7 +2004,7 @@ func (x *StreamTelemetryRequest) String() string {
 func (*StreamTelemetryRequest) ProtoMessage() {}
 
 func (x *StreamTelemetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[18]
+	mi := &file_dataplane_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1918,7 +2017,7 @@ func (x *StreamTelemetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamTelemetryRequest.ProtoReflect.Descriptor instead.
 func (*StreamTelemetryRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{18}
+	return file_dataplane_proto_rawDescGZIP(), []int{19}
 }
 
 type StreamEventsRequest struct {
@@ -1929,7 +2028,7 @@ type StreamEventsRequest struct {
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_dataplane_proto_msgTypes[19]
+	mi := &file_dataplane_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1941,7 +2040,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_proto_msgTypes[19]
+	mi := &file_dataplane_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1954,7 +2053,7 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_proto_rawDescGZIP(), []int{19}
+	return file_dataplane_proto_rawDescGZIP(), []int{20}
 }
 
 var File_dataplane_proto protoreflect.FileDescriptor
@@ -2021,7 +2120,7 @@ const file_dataplane_proto_rawDesc = "" +
 	"frame_size\x18\x06 \x01(\rR\tframeSize\x12\x18\n" +
 	"\apayload\x18\a \x01(\fR\apayloadB\x04\n" +
 	"\x02l3B\x04\n" +
-	"\x02l4\"\xac\x02\n" +
+	"\x02l4\"\xd8\x02\n" +
 	"\x14StartScenarioRequest\x12\x1f\n" +
 	"\vscenario_id\x18\x01 \x01(\tR\n" +
 	"scenarioId\x12\x1b\n" +
@@ -2032,7 +2131,15 @@ const file_dataplane_proto_rawDesc = "" +
 	"\vstart_at_ns\x18\x05 \x01(\x04R\tstartAtNs\x12*\n" +
 	"\x06packet\x18\x06 \x01(\v2\x12.mir.v1.PacketSpecR\x06packet\x12\x1b\n" +
 	"\ttx_lcores\x18\a \x01(\rR\btxLcores\x123\n" +
-	"\thandshake\x18\b \x01(\v2\x15.mir.v1.HandshakeSpecR\thandshake\"\xff\x02\n" +
+	"\thandshake\x18\b \x01(\v2\x15.mir.v1.HandshakeSpecR\thandshake\x12*\n" +
+	"\x06replay\x18\t \x01(\v2\x12.mir.v1.ReplayOptsR\x06replay\"\x97\x01\n" +
+	"\n" +
+	"ReplayOpts\x12'\n" +
+	"\x0fpreserve_timing\x18\x01 \x01(\bR\x0epreserveTiming\x12\x14\n" +
+	"\x05speed\x18\x02 \x01(\x01R\x05speed\x12\x12\n" +
+	"\x04loop\x18\x03 \x01(\rR\x04loop\x12\x1b\n" +
+	"\tfirst_pkt\x18\x04 \x01(\rR\bfirstPkt\x12\x19\n" +
+	"\blast_pkt\x18\x05 \x01(\rR\alastPkt\"\xff\x02\n" +
 	"\rHandshakeSpec\x12!\n" +
 	"\x03eth\x18\x01 \x01(\v2\x0f.mir.v1.EthSpecR\x03eth\x12\x15\n" +
 	"\x06src_ip\x18\x02 \x01(\tR\x05srcIp\x12\x15\n" +
@@ -2145,7 +2252,7 @@ func file_dataplane_proto_rawDescGZIP() []byte {
 }
 
 var file_dataplane_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_dataplane_proto_goTypes = []any{
 	(MsgType)(0),                   // 0: mir.v1.MsgType
 	(HandshakeSpec_Action)(0),      // 1: mir.v1.HandshakeSpec.Action
@@ -2160,16 +2267,17 @@ var file_dataplane_proto_goTypes = []any{
 	(*UdpSpec)(nil),                // 10: mir.v1.UdpSpec
 	(*PacketSpec)(nil),             // 11: mir.v1.PacketSpec
 	(*StartScenarioRequest)(nil),   // 12: mir.v1.StartScenarioRequest
-	(*HandshakeSpec)(nil),          // 13: mir.v1.HandshakeSpec
-	(*StopScenarioRequest)(nil),    // 14: mir.v1.StopScenarioRequest
-	(*Ack)(nil),                    // 15: mir.v1.Ack
-	(*PortStats)(nil),              // 16: mir.v1.PortStats
-	(*TelemetrySnapshot)(nil),      // 17: mir.v1.TelemetrySnapshot
-	(*HandshakeStats)(nil),         // 18: mir.v1.HandshakeStats
-	(*RxClass)(nil),                // 19: mir.v1.RxClass
-	(*Event)(nil),                  // 20: mir.v1.Event
-	(*StreamTelemetryRequest)(nil), // 21: mir.v1.StreamTelemetryRequest
-	(*StreamEventsRequest)(nil),    // 22: mir.v1.StreamEventsRequest
+	(*ReplayOpts)(nil),             // 13: mir.v1.ReplayOpts
+	(*HandshakeSpec)(nil),          // 14: mir.v1.HandshakeSpec
+	(*StopScenarioRequest)(nil),    // 15: mir.v1.StopScenarioRequest
+	(*Ack)(nil),                    // 16: mir.v1.Ack
+	(*PortStats)(nil),              // 17: mir.v1.PortStats
+	(*TelemetrySnapshot)(nil),      // 18: mir.v1.TelemetrySnapshot
+	(*HandshakeStats)(nil),         // 19: mir.v1.HandshakeStats
+	(*RxClass)(nil),                // 20: mir.v1.RxClass
+	(*Event)(nil),                  // 21: mir.v1.Event
+	(*StreamTelemetryRequest)(nil), // 22: mir.v1.StreamTelemetryRequest
+	(*StreamEventsRequest)(nil),    // 23: mir.v1.StreamEventsRequest
 }
 var file_dataplane_proto_depIdxs = []int32{
 	4,  // 0: mir.v1.HelloResponse.ports:type_name -> mir.v1.PortInfo
@@ -2179,28 +2287,29 @@ var file_dataplane_proto_depIdxs = []int32{
 	9,  // 4: mir.v1.PacketSpec.tcp:type_name -> mir.v1.TcpSpec
 	10, // 5: mir.v1.PacketSpec.udp:type_name -> mir.v1.UdpSpec
 	11, // 6: mir.v1.StartScenarioRequest.packet:type_name -> mir.v1.PacketSpec
-	13, // 7: mir.v1.StartScenarioRequest.handshake:type_name -> mir.v1.HandshakeSpec
-	6,  // 8: mir.v1.HandshakeSpec.eth:type_name -> mir.v1.EthSpec
-	1,  // 9: mir.v1.HandshakeSpec.on_synack:type_name -> mir.v1.HandshakeSpec.Action
-	16, // 10: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
-	19, // 11: mir.v1.TelemetrySnapshot.rx:type_name -> mir.v1.RxClass
-	18, // 12: mir.v1.TelemetrySnapshot.handshake:type_name -> mir.v1.HandshakeStats
-	2,  // 13: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
-	3,  // 14: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
-	12, // 15: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
-	14, // 16: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
-	21, // 17: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
-	22, // 18: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
-	5,  // 19: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
-	15, // 20: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
-	15, // 21: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
-	17, // 22: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
-	20, // 23: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
-	19, // [19:24] is the sub-list for method output_type
-	14, // [14:19] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	14, // 7: mir.v1.StartScenarioRequest.handshake:type_name -> mir.v1.HandshakeSpec
+	13, // 8: mir.v1.StartScenarioRequest.replay:type_name -> mir.v1.ReplayOpts
+	6,  // 9: mir.v1.HandshakeSpec.eth:type_name -> mir.v1.EthSpec
+	1,  // 10: mir.v1.HandshakeSpec.on_synack:type_name -> mir.v1.HandshakeSpec.Action
+	17, // 11: mir.v1.TelemetrySnapshot.ports:type_name -> mir.v1.PortStats
+	20, // 12: mir.v1.TelemetrySnapshot.rx:type_name -> mir.v1.RxClass
+	19, // 13: mir.v1.TelemetrySnapshot.handshake:type_name -> mir.v1.HandshakeStats
+	2,  // 14: mir.v1.Event.kind:type_name -> mir.v1.Event.Kind
+	3,  // 15: mir.v1.DataPlane.Hello:input_type -> mir.v1.HelloRequest
+	12, // 16: mir.v1.DataPlane.StartScenario:input_type -> mir.v1.StartScenarioRequest
+	15, // 17: mir.v1.DataPlane.StopScenario:input_type -> mir.v1.StopScenarioRequest
+	22, // 18: mir.v1.DataPlane.StreamTelemetry:input_type -> mir.v1.StreamTelemetryRequest
+	23, // 19: mir.v1.DataPlane.StreamEvents:input_type -> mir.v1.StreamEventsRequest
+	5,  // 20: mir.v1.DataPlane.Hello:output_type -> mir.v1.HelloResponse
+	16, // 21: mir.v1.DataPlane.StartScenario:output_type -> mir.v1.Ack
+	16, // 22: mir.v1.DataPlane.StopScenario:output_type -> mir.v1.Ack
+	18, // 23: mir.v1.DataPlane.StreamTelemetry:output_type -> mir.v1.TelemetrySnapshot
+	21, // 24: mir.v1.DataPlane.StreamEvents:output_type -> mir.v1.Event
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_dataplane_proto_init() }
@@ -2220,7 +2329,7 @@ func file_dataplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_proto_rawDesc), len(file_dataplane_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

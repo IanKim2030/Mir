@@ -193,8 +193,10 @@ int mir_tx_start(const Mir__V1__StartScenarioRequest *req,
         seterr(err, errlen, "포트가 준비되지 않았다");
         return -1;
     }
+    /* pcap_path 는 ipc_server 가 mir_replay_start 로 먼저 분기하므로 여기 오지
+     * 않는다. 방어적으로 남기되(직접 호출 대비) 조용히 거부한다. */
     if (req->pcap_path && *req->pcap_path) {
-        seterr(err, errlen, "PCAP 리플레이는 Phase 4-1 이다 (packet 명세를 쓸 것)");
+        seterr(err, errlen, "pcap_path 는 리플레이 엔진(mir_replay_start)이 처리한다");
         return -1;
     }
 

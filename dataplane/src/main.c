@@ -50,6 +50,7 @@
 #include "session.h"
 #include "stats.h"
 #include "tx_engine.h"
+#include "replay.h"
 #include "tx_hello.h"
 
 #ifndef MIR_VERSION
@@ -416,6 +417,7 @@ int main(void)
     /* worker 가 아직 tx/rx_burst 를 돌고 있는데 포트를 닫으면 그대로 깨진다.
      * 반드시 포트보다 먼저 세운다. */
     mir_tx_shutdown();
+    mir_replay_shutdown();
     mir_session_shutdown();
     mir_rx_stop();
 

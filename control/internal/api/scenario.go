@@ -31,9 +31,13 @@ type startRequest struct {
 	TxLcores   uint32   `json:"txLcores"`
 	StartAtNs  uint64   `json:"startAtNs"`
 
-	// packet(모드 A) 과 handshake(모드 B)는 배타. 정확히 하나여야 한다.
+	// packet(모드 A)·handshake(모드 B)·replay(모드 C)는 배타. 정확히 하나여야 한다.
+	// 모드 C 는 pcapPath 가 필수이고 replay 옵션은 선택이다 — 파일 내용이 아니라
+	// 공유 볼륨 상의 경로만 전달한다(데이터플레인이 RO 로 마운트).
 	Packet    json.RawMessage `json:"packet"`
 	Handshake json.RawMessage `json:"handshake"`
+	PcapPath  string          `json:"pcapPath"`
+	Replay    json.RawMessage `json:"replay"`
 }
 
 type stopRequest struct {
@@ -54,6 +58,13 @@ type scenarioResponse struct {
 	ScenarioID string           `json:"scenarioId"`
 	OK         bool             `json:"ok"` // 전부 성공했는가
 	Results    []instanceResult `json:"results"`
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func decodeJSON(r *http.Request, v any) error {
@@ -87,14 +98,21 @@ func (s *Server) startScenario(w http.ResponseWriter, r *http.Request) {
 	}
 	hasPacket := len(req.Packet) > 0
 	hasHandshake := len(req.Handshake) > 0
-	if hasPacket == hasHandshake {
+	hasReplay := req.PcapPath != ""
+	if b2i(hasPacket)+b2i(hasHandshake)+b2i(hasReplay) != 1 {
 		writeError(w, http.StatusBadRequest,
-			"packet(모드 A) 또는 handshake(모드 B) 중 정확히 하나가 필요하다")
+			"packet(모드 A)·handshake(모드 B)·pcapPath(모드 C) 중 정확히 하나가 필요하다")
+		return
+	}
+	if len(req.Replay) > 0 && !hasReplay {
+		writeError(w, http.StatusBadRequest,
+			"replay 옵션은 pcapPath(모드 C)와 함께만 쓸 수 있다")
 		return
 	}
 
 	cmd := &pb.StartScenarioRequest{
 		ScenarioId: req.ScenarioID,
+		PcapPath:   req.PcapPath,
 		RatePps:    req.RatePps,
 		DurationS:  req.DurationS,
 		TxLcores:   req.TxLcores,
@@ -103,20 +121,30 @@ func (s *Server) startScenario(w http.ResponseWriter, r *http.Request) {
 
 	// DiscardUnknown 을 켜지 않는다 — 오타 난 필드가 조용히 무시되면
 	// "왜 내가 설정한 대로 안 되지"를 추적할 수 없다.
-	if hasPacket {
+	switch {
+	case hasPacket:
 		spec := &pb.PacketSpec{}
 		if err := protojson.Unmarshal(req.Packet, spec); err != nil {
 			writeError(w, http.StatusBadRequest, "packet 명세 해석 실패: "+err.Error())
 			return
 		}
 		cmd.Packet = spec
-	} else {
+	case hasHandshake:
 		spec := &pb.HandshakeSpec{}
 		if err := protojson.Unmarshal(req.Handshake, spec); err != nil {
 			writeError(w, http.StatusBadRequest, "handshake 명세 해석 실패: "+err.Error())
 			return
 		}
 		cmd.Handshake = spec
+	case hasReplay:
+		if len(req.Replay) > 0 {
+			opts := &pb.ReplayOpts{}
+			if err := protojson.Unmarshal(req.Replay, opts); err != nil {
+				writeError(w, http.StatusBadRequest, "replay 옵션 해석 실패: "+err.Error())
+				return
+			}
+			cmd.Replay = opts
+		}
 	}
 
 	targets, err := s.resolveTargets(req.Targets)
@@ -125,9 +153,14 @@ func (s *Server) startScenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode := "B/handshake"
+	if hasPacket {
+		mode = "A/packet"
+	} else if hasReplay {
+		mode = "C/replay"
+	}
 	s.log.Info("시나리오 시작 요청",
-		"id", req.ScenarioID, "targets", targets, "mode",
-		map[bool]string{true: "A/packet", false: "B/handshake"}[hasPacket])
+		"id", req.ScenarioID, "targets", targets, "mode", mode)
 
 	resp := scenarioResponse{ScenarioID: req.ScenarioID, OK: true}
 	for _, name := range targets {

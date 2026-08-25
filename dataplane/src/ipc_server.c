@@ -5,6 +5,7 @@
 #include "events.h"
 #include "session.h"
 #include "tx_engine.h"
+#include "replay.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -337,9 +338,15 @@ static int send_telemetry(int fd)
      * 데이터플레인이 스스로 무엇을 하고 있다고 생각하는지를 올려야
      * 제어부가 명령한 것과 대조할 수 있다. */
     mir_tx_status tx;
+    mir_replay_status rp;
     if (mir_tx_status_get(&tx)) {
         snap.active_scenario = tx.scenario_id;
         snap.tx_lcores       = tx.tx_lcores;
+    } else if (mir_replay_status_get(&rp)) {
+        /* 리플레이도 스스로 끝났으면 여기서 거둔다(status_get 의 부수효과).
+         * tx 카운터는 mir_stats 합산으로 이미 흐르므로 이름만 올린다. */
+        snap.active_scenario = rp.scenario_id;
+        snap.tx_lcores       = 1;
     }
 
     size_t len = mir__v1__telemetry_snapshot__get_packed_size(&snap);
@@ -391,7 +398,23 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
                 "포트가 없다 — vfio 바인딩과 MIR_DEVICE_SPEC 를 확인할 것");
         }
 
-        if (req->handshake) {
+        if (req->pcap_path && *req->pcap_path) {
+            /* 모드 C — PCAP 리플레이. pcap_path 가 있으면 packet/handshake 는
+             * 무시한다(proto 규약). worker lcore 하나가 순차 재생한다. */
+            LOG(INFO, "replay 요청: id=%s path=%s loop=%u timing=%d",
+                req->scenario_id ? req->scenario_id : "",
+                req->pcap_path,
+                req->replay ? req->replay->loop : 0,
+                req->replay ? req->replay->preserve_timing : 0);
+            rc = mir_replay_start(req, &g_cfg.dev[0], g_cfg.lcores,
+                                  g_cfg.n_lcores, terr, sizeof(terr));
+            mir_replay_status rp;
+            if (rc == 0 && mir_replay_status_get(&rp))
+                snprintf(msg, sizeof(msg),
+                         "리플레이 시작됨: %s 프레임 %u개 재생=%u회 timing=%s",
+                         rp.format, rp.n_frames, rp.loops_target,
+                         rp.preserve_timing ? "보존" : "최대");
+        } else if (req->handshake) {
             /* 모드 B — handshake 제어. RX lcore 가 실제 상태를 돌린다. */
             LOG(INFO, "handshake 요청: id=%s dst=%s:%u sessions=%u action=%d",
                 req->scenario_id ? req->scenario_id : "",
@@ -437,14 +460,16 @@ static int handle_frame(int fd, uint16_t type, const uint8_t *payload, size_t le
          * 정지가 되게 한다. */
         mir_tx_status st;
         mir_session_stats ss;
+        mir_replay_status rp;
         mir_tx_status_get(&st);
         mir_session_get_stats(&ss);
-        int was = st.tx_lcores > 0 || ss.active;
+        int was = st.tx_lcores > 0 || ss.active || mir_replay_status_get(&rp);
 
         char terr[256] = {0};
         if (mir_tx_stop(terr, sizeof(terr)) != 0)
             return send_ack(fd, 0, terr);
         mir_session_request_stop();
+        mir_replay_stop(terr, sizeof(terr));
 
         return send_ack(fd, 1, was ? "정지됨" : "실행 중인 시나리오가 없었다");
     }

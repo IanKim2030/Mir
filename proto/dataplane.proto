@@ -199,6 +199,34 @@ message StartScenarioRequest {
   // Mode A(무상태 블라스트)와 근본적으로 다르다. 상태를 들고 SYN→SYN-ACK→행동
   // 피드백 루프를 돌리므로 라인레이트가 아니라 **세션 수 제한**이다.
   HandshakeSpec handshake = 8;
+
+  // 모드 C — PCAP 리플레이 (Phase 4-1). pcap_path 와 함께 쓴다.
+  // pcap_path 가 설정돼 있으면 packet/handshake 는 무시된다.
+  ReplayOpts replay = 9;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 모드 C — PCAP 리플레이 옵션 (Phase 4-1)
+//
+// pcap_path 가 가리키는 파일(공유 볼륨)을 그대로 선로에 재생한다. 파일 내용은
+// 제어 채널을 타지 않는다 — 경로만 명령으로 전달된다(StartScenarioRequest 주석).
+// Ethernet 링크타입 프레임만 재생하고, 그 외는 건너뛴다.
+// ─────────────────────────────────────────────────────────────
+message ReplayOpts {
+  // 원본 패킷 간 간격을 유지한다. false 면 NIC 이 받는 대로 최대 속도.
+  bool preserve_timing = 1;
+
+  // preserve_timing 일 때 배속. 0 또는 1 = 원속, 2 = 두 배 빠르게. SPB 처럼
+  // 타임스탬프가 없는 레코드가 섞이면 그 구간은 최대 속도로 나간다.
+  double speed = 2;
+
+  // 반복 횟수. 0 = 1회.
+  uint32 loop = 3;
+
+  // 구간 재전송 (0-based). first_pkt 부터 last_pkt 까지.
+  // last_pkt = 0 이면 끝까지. 큰 캡처를 나눠 보낼 때 쓴다.
+  uint32 first_pkt = 4;
+  uint32 last_pkt  = 5;
 }
 
 // ─────────────────────────────────────────────────────────────

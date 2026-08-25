@@ -76,6 +76,7 @@ services:
       - /dev/vfio/${MIR_DP0_VFIO_GROUP}
     volumes:
       - /dev/hugepages:/dev/hugepages
+      - ${MIR_PCAP_DIR:-/var/lib/mir/pcap}:/var/lib/mir/pcap:ro
       - ipc0:/var/run/mir
 
   agent0:
@@ -112,6 +113,7 @@ services:
       - /dev/vfio/${MIR_DP1_VFIO_GROUP}
     volumes:
       - /dev/hugepages:/dev/hugepages
+      - ${MIR_PCAP_DIR:-/var/lib/mir/pcap}:/var/lib/mir/pcap:ro
       - ipc1:/var/run/mir
 
   agent1:
@@ -147,6 +149,7 @@ services:
       - /dev/vfio/${MIR_DP2_VFIO_GROUP}
     volumes:
       - /dev/hugepages:/dev/hugepages
+      - ${MIR_PCAP_DIR:-/var/lib/mir/pcap}:/var/lib/mir/pcap:ro
       - ipc2:/var/run/mir
 
   agent2:
@@ -182,6 +185,7 @@ services:
       - /dev/vfio/${MIR_DP3_VFIO_GROUP}
     volumes:
       - /dev/hugepages:/dev/hugepages
+      - ${MIR_PCAP_DIR:-/var/lib/mir/pcap}:/var/lib/mir/pcap:ro
       - ipc3:/var/run/mir
 
   agent3:
