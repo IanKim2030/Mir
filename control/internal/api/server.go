@@ -19,6 +19,7 @@ import (
 	"mir/internal/fleet"
 	"mir/internal/pb"
 	"mir/internal/registry"
+	"mir/internal/webui"
 )
 
 // 인스턴스 상태. 기대(함대 설정)와 실측(HelloResponse)을 대조한 결과다.
@@ -55,6 +56,10 @@ func (s *Server) Routes() http.Handler {
 
 	// 수신 판정 (Phase 3)
 	mux.HandleFunc("GET /api/events", s.listEvents)
+
+	// GUI (Phase 6) — 내장 React SPA. "/" 는 catch-all 이라 위의 구체적
+	// 패턴(/api·/healthz·/readyz)이 먼저 잡힌다(Go 1.22 mux 우선순위).
+	mux.Handle("/", webui.Handler())
 
 	return mux
 }

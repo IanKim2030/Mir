@@ -4,6 +4,13 @@ control/bin/
 *.o
 *.a
 
+# 프론트엔드 (Phase 6). node_modules 는 무시하되, Vite 빌드 산출물인
+# control/internal/webui/dist 는 go:embed 대상이라 **커밋한다**(node 없이
+# go build/Docker 가 되도록).
+web/node_modules/
+web/dist/
+web/.vite/
+
 # 장비별 설정 — 예제(*.example)만 커밋한다
 deploy/compose/.env
 deploy/compose/fleet.yaml
