@@ -17,14 +17,14 @@
                     └──────────────┬──────────────┘
                                    │ REST / WebSocket
                     ┌──────────────▼──────────────┐
-   k8s API ◀────────┤  mir-control  (Go)          │   제어부 파드 × 1
-   (scale/patch)    │  registry · api · k8s       │
+  fleet.yaml ───────▶│  mir-control  (Go)          │   함대 전체에 × 1
+  (기대 인벤토리)      │  registry · api · fleet     │
                     └──────────────┬──────────────┘
-                                   │ ④ gRPC (스트리밍)
+                                   │ ④ gRPC (스트리밍, mTLS)
       ┌────────────────────────────┼────────────────────────────┐
-      │                            │                            │
+      │                            │           (장비 경계를 넘을 수 있다)
 ┌─────▼─────────────────┐   ┌──────▼────────────────┐          ...
-│ mir-agent   (Go)      │   │ mir-agent             │   데이터플레인 파드 × N
+│ mir-agent   (Go)      │   │ mir-agent             │   인스턴스 × N
 │ 사이드카 · 공유 풀 코어 │   │                       │   (NIC PF 하나당 하나)
 ├───────────────────────┤   ├───────────────────────┤
 │ ③ unix socket         │   │ ③                     │
@@ -42,9 +42,9 @@
 |---|---|
 | C ↔ Go (③) | Go↔DPDK **cgo 오버헤드 회피**. C 를 순수 C 로 유지(libstdc++·abseil 불필요) |
 | 사이드카 ↔ 제어부 (④) | gRPC 스레드 풀이 C 프로세스 cpuset(= worker 코어)을 떠도는 것을 **구조로 차단**. 별도 컨테이너라 물리적 경로 자체가 없다 |
-| 제어부 ↔ 데이터플레인 (파드 분리) | 개수·리소스 변경은 **반드시 재시작을 수반**한다. 같은 파드면 제어부가 자기 자신을 죽이는 명령을 내리게 된다 |
+| 제어부 ↔ 데이터플레인 (배포 단위 분리) | 개수·리소스 변경은 **반드시 재시작을 수반**한다. 제어부가 함께 죽으면 진단 창구가 사라진다. 멀티 장비에서는 애초에 다른 장비에 있다 |
 
-> **개별 패킷(mbuf)은 프로세스 경계를 넘지 않는다.** 파드당 148 Mpps 를 밖으로
+> **개별 패킷(mbuf)은 프로세스 경계를 넘지 않는다.** 인스턴스당 148 Mpps 를 밖으로
 > 내보내는 것은 성립하지 않으므로, C 는 **판정 결과와 요약만** 올린다.
 > 그래서 제어 채널이 지연되거나 끊겨도 판정 정확도에 영향이 없다.
 
@@ -59,8 +59,8 @@
 |---|---|---|---|
 | ① | worker lcore → 제어 스레드 | per-lcore 카운터 (`mir_stats[RTE_MAX_LCORE]`) | 캐시라인 정렬. **단일 writer** 라 락·원자연산 불필요 |
 | ② | worker lcore → 제어 스레드 | `rte_ring` (lock-free MPSC) | full 이면 **버리고** drop 카운터만 증가. worker 는 절대 블로킹하지 않는다 |
-| ③ | C ⇄ 사이드카 (파드 내부) | unix socket + protobuf-c | 4바이트 length-prefix. 네트워크가 아니라 재연결·백프레셔 문제가 거의 없다 |
-| ④ | 사이드카 ⇄ 제어부 (파드 간) | **gRPC** 스트리밍 | headless Service EndpointSlice 로 자동 연결/해제 |
+| ③ | C ⇄ 사이드카 (같은 장비, 공유 볼륨) | unix socket + protobuf-c | 4바이트 length-prefix. 네트워크가 아니라 재연결·백프레셔 문제가 거의 없다 |
+| ④ | 사이드카 ⇄ 제어부 (장비 경계를 넘을 수 있다) | **gRPC** 스트리밍 + **mTLS** | 함대 설정의 주소 집합에 자동 연결/해제 |
 | ⑤ | 벌크 데이터 | 공유 볼륨 (PV) | PCAP 은 GB 단위 → **경로 문자열만** 전달 |
 
 ### ③ 와이어 포맷
@@ -112,7 +112,7 @@ sequenceDiagram
     A->>A: health SERVING 전환
     Note over K: readinessProbe 통과 → Endpoints 등록
 
-    C->>C: EndpointSlice reconcile (5s 주기)
+    C->>C: Resolver reconcile (5s 주기, 함대 설정)
     C->>A: gRPC Hello(control_version)
     A->>D: ③ HELLO_REQUEST
     D-->>A: ③ HELLO_RESPONSE (ports, lcores, main_lcore)
@@ -121,7 +121,10 @@ sequenceDiagram
 ```
 
 **핵심**: 사이드카는 데이터플레인이 붙기 전까지 `NOT_SERVING` 이다. 그래서 EAL
-초기화 중인 파드는 Endpoints 에 들어가지 않고, 제어부가 헛되이 연결하지 않는다.
+초기화 중인 인스턴스는 NOT_SERVING 이라 준비되지 않은 곳에 시나리오가 배정되지 않는다.
+**포트를 하나도 잡지 못한 인스턴스도 NOT_SERVING 으로 남는다** — 소켓이 붙었다는
+것은 C 프로세스가 살아 있다는 뜻일 뿐이라, 사이드카가 스스로 Hello 를 던져
+포트 보유를 확인한 뒤에만 SERVING 으로 올린다(`agent.probeReady`).
 
 ### 3-2. 텔레메트리 (100ms push)
 
@@ -191,46 +194,60 @@ sequenceDiagram
 > 돌려준다.** 성공을 가장하지 않는다. PCAP 은 ⑤ 채널(공유 볼륨)을 경유하므로
 > 이 요청에는 **경로 문자열만** 실린다.
 
-### 3-4. 개수 조정 (scale)
+### 3-4. 개수·리소스 조정 — 제어부가 하지 않는다
+
+**제어부는 인스턴스의 라이프사이클을 조종하지 않는다.** compose 파일과 `.env` 가
+소유하고, 제어부는 관측만 한다. 근거 둘:
+
+- **권한.** compose 를 조종하려면 장비마다 `docker.sock`(root 등가)을 받아야 한다.
+  GUI 가 웹으로 노출되는 구조에서 명백한 후퇴다. 오케스트레이터 시절에는 RBAC 으로
+  좁힌 위임이 가능해 이 API 가 **쌌기 때문에** 존재했던 것이지 필요해서 생긴 게 아니다.
+- **멀티 장비.** `docker.sock` 은 장비 로컬이고 제어부는 원격이라 성립하지 않는다.
+
+그리고 **무중단은 어차피 불가능**하다 — 세 겹의 제약이 겹쳐 있다:
+
+1. 컨테이너 spec 은 **불변** → 변경 = 재생성
+2. hugepage·확장 리소스는 in-place resize 대상이 아니다
+3. **DPDK 가 런타임 lcore 변경을 지원하지 않는다** (`rte_eal_init` 이 고정)
+
+어떤 방식이든 재시작을 수반하므로 **선언적 파일이 맞는 자리**다.
+
+### 3-4-1. 대신 하는 일 — 기대와 실측의 대조
 
 ```mermaid
 sequenceDiagram
     participant G as GUI
     participant API as api.Server
-    participant K8 as k8s.Client
-    participant KA as k8s API
+    participant F as fleet.Config
     participant R as registry
 
-    G->>API: PUT /api/dataplanes/scale {replicas}
-    API->>K8: Scale(replicas)
-    K8->>KA: 노드 Allocatable 조회
-    Note over K8: MaxDataplanes = Σ allocatable[mir.io/dpdk_pf]
-    alt replicas > Max
-        K8-->>API: ErrOverCapacity
-        API-->>G: 400 "PF 는 N개다"
+    G->>API: GET /api/dataplanes
+    API->>F: Instances()  (기대 인벤토리)
+    API->>R: ByName()     (실측: 연결·Hello·텔레메트리)
+    Note over API: 기대를 기준으로 순회하며 실측을 겹친다
+
+    alt 실측 없음
+        API-->>G: state=unreachable
+    else Hello 아직 없음
+        API-->>G: state=connecting
+    else ports 비었음
+        API-->>G: state=no-ports
+    else 기대 PF 가 ports 에 없음
+        API-->>G: state=pf-mismatch
     else
-        K8->>KA: PATCH deployments/<name>/scale
-        KA->>KA: 파드 생성/삭제
-        loop 5초
-            R->>KA: EndpointSlice 조회
-            R->>R: 사라진 peer close / 새 peer dial+Hello
-        end
+        API-->>G: state=ok
     end
 ```
 
-**상한 검증을 API 단계에서 하는 이유**: 통과시키면 초과분이 조용히 `Pending` 에
-쌓이고, 사용자는 파드 이벤트를 뒤져야 원인을 알게 된다.
+**순회 기준이 기대라는 점이 핵심이다.** 실측을 기준으로 돌면 없는 인스턴스가
+목록에서 조용히 빠져, 가장 알고 싶은 상태("떠 있어야 하는데 없다")를 표현할 수 없다.
 
-**무중단은 불가능하다** — 세 겹의 제약이 겹쳐 있다:
+이 구분은 노드 allocatable 을 합산하던 방식보다 **정확하다** — 그때는 "몇 개가
+Ready 인가"밖에 알 수 없어 컨테이너 다운과 PF 미확보가 구분되지 않았다.
 
-1. Pod 의 `spec.containers` 는 **불변** → 변경 = Pod 재생성
-2. in-place resize 는 static CPU manager + Guaranteed 조합에서 **Infeasible**
-   (hugepages·확장 리소스는 애초에 resize 대상도 아니다)
-3. **DPDK 가 런타임 lcore 변경을 지원하지 않는다** (`rte_eal_init` 이 고정)
-
-목표는 무중단이 아니라 **재시작 범위를 데이터플레인으로만 한정**하는 것이다.
-`SetResources` 는 strategic merge patch 로 `dataplane` 컨테이너만 겨냥한다 —
-사이드카(`agent`)는 공유 풀에 남아야 하므로 건드리지 않는다.
+> `pf-mismatch` 가 성립하려면 `PortInfo.device_spec` 이 **요청한** BDF 가 아니라
+> EAL 이 실제로 붙인 장치 이름이어야 한다. `main.c` 가 `rte_dev_name(info.device)`
+> 를 싣는 이유다 — 요청값을 되돌려주면 설정을 설정과 비교하는 꼴이 된다.
 
 ### 3-5. 연결 끊김과 복구
 
@@ -240,10 +257,12 @@ sequenceDiagram
 |---|---|---|
 | ③ C ⇄ 사이드카 | `agent.Run` | 200ms → 5s 지수 백오프 재연결, health `NOT_SERVING` 전환 |
 | ④ 사이드카 ⇄ 제어부 | `peer.run` | 2s 백오프로 Hello 재시도 → 성공 시 스트림 재개 |
-| 파드 재생성 (IP 변경) | `registry.reconcile` | 5초 주기 EndpointSlice 조회로 자동 해제/연결 |
+| 인스턴스 재생성·주소 변경 | `registry.reconcile` | 5초 주기 `Resolver` 조회로 자동 해제/연결 |
 
-데이터플레인이 리소스 변경으로 롤링 재생성되면 주소가 바뀌는데, `reconcile` 이
-알아서 끊고 다시 붙기 때문에 **재시작 후 복구 로직이 따로 없다.**
+데이터플레인을 재생성해도 `reconcile` 이 알아서 끊고 다시 붙기 때문에
+**재시작 후 복구 로직이 따로 없다.** `Resolver` 가 실패하면(설정 파일을 잠깐 못
+읽는 등) 기존 연결을 **건드리지 않는다** — 멀쩡히 돌던 인스턴스를 전부 끊는
+것보다 낫다.
 
 ---
 
@@ -276,14 +295,15 @@ sequenceDiagram
 
 ### EAL 인자는 런타임에 조립한다
 
-k8s CPU Manager 는 **임의의** 배타 코어를 주므로 `-l 1-4` 같은 하드코딩은 반드시
-깨진다. PCI 주소도 device plugin 이 파드마다 다르게 주입한다.
+인스턴스마다 코어도 장치도 다르므로 `-l 1-4` 같은 하드코딩은 반드시 깨진다.
+compose 의 `cpuset` 이 무엇을 줬는지는 `sched_getaffinity` 로만 확인되고,
+장치는 `MIR_DEVICE_SPEC` 으로 인스턴스마다 다르게 주입된다.
 
 | 인자 | 출처 |
 |---|---|
 | lcore 목록 | `sched_getaffinity(2)` — 실제 할당된 cpuset |
 | 장치 | `PCIDEVICE_*` (device plugin) 또는 `MIR_DEVICE_SPEC` |
-| `--file-prefix` | `HOSTNAME` — 같은 노드의 파드 간 hugepage 충돌 방지 |
+| `--file-prefix` | `HOSTNAME` — 같은 장비의 인스턴스 간 hugepage 파일 충돌 방지 |
 
 `device_spec_kind` 는 `PCI_BDF` / `MAC_ADDR` 두 갈래를 미리 열어 뒀다. Azure MANA
 PMD 가 BDF 가 아니라 **MAC 주소**로 바인딩 대상을 정하기 때문이다(Phase 8).
@@ -313,7 +333,7 @@ Tier 3  --vdev net_af_packet0,iface=eth2   ← 준비물 없음. --no-huge 가�
 
 | Phase | 상태 | 건드리는 곳 | 채널 |
 |---|:---:|---|---|
-| **0** 환경/HW + 인프라 골격 | ✅ | `eal_args.c` · `ipc_server.c` · `deploy/**` · `internal/{k8s,registry,api}` | ③④ 확립 |
+| **0** 환경/HW + 인프라 골격 | ✅ | `eal_args.c` · `ipc_server.c` · `deploy/**` · `internal/{fleet,mtls,registry,api}` | ③④ 확립 |
 | **1** hello packet | ✅ | `port.c` · `tx_hello.c` | — |
 | **2** L2~L4 고속 송신 | ⬜ | **헤더 빌더 신설** · worker lcore 루프 · 속도 제어 | **① 실사용 시작** |
 | **3** 수신 캡처 + 판정 | ⬜ | RX 루프 · 실시간 판정 → `Event` 생성 | **② 실사용 시작** |
@@ -349,13 +369,13 @@ worker lcore 가 생기는 순간 이 문서의 **4절(스레드·코어 모델)
 
 | 메서드 | 경로 | 용도 |
 |---|---|---|
-| `GET` | `/healthz` | 연결된 데이터플레인 수 / 전체 |
-| `GET` | `/api/capacity` | 노드별 allocatable PF·CPU·hugepage, `maxDataplanes` |
-| `GET` | `/api/dataplanes` | **k8s 가 아는 것 + 제어부가 아는 것을 병합** |
-| `PUT` | `/api/dataplanes/scale` | 개수 조정 (상한 초과 시 400) |
-| `PUT` | `/api/dataplanes/resources` | cpu·memory·hugepages (응답에 `restartRequired: true`) |
-| `POST` | `/api/dataplanes/{name}/restart` | 파드 삭제 → Deployment 가 재생성 |
+| `GET` | `/healthz` | **liveness** — 프로세스가 응답하면 200 |
+| `GET` | `/readyz` | **readiness** — 기대한 인스턴스가 전부 붙었을 때만 200, 아니면 503 + `missing` |
+| `GET` | `/api/capacity` | 장비 단위 롤업 (expected / ready) |
+| `GET` | `/api/dataplanes` | 인스턴스 단위 상세 — **기대 + 실측 대조** (3-4-1) |
 
-`/api/dataplanes` 가 두 출처를 합치는 이유: 둘 중 하나만 보면 원인 파악이 어렵다.
-**`Running` 인데 `connected=false`** 면 사이드카나 EAL 초기화 쪽으로 문제가 좁혀진다.
-`Pending` 의 사유(대개 PF 부족)도 `message` 에 그대로 노출한다.
+**liveness 와 readiness 를 나눈 이유**: 함대 상태를 `/healthz` 에 섞으면
+데이터플레인이 안 떴다고 제어부가 재시작되는데, 그래 봐야 나아질 게 없고
+진단 창구만 사라진다. 컨테이너 healthcheck 는 `/healthz` 만 본다.
+
+개수·리소스 변경과 재시작 API 는 **없다** — 3-4 절 참조.

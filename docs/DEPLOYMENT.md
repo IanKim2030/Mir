@@ -1,398 +1,336 @@
-# 배포 가이드 — 베어메탈 단일 노드 k8s
+# 배포 가이드 — Docker Compose (단일/멀티 장비)
 
-Mir 데이터플레인(C/DPDK)과 제어부(Go)를 베어메탈 한 대의 단일 노드 k8s 위에
-올리는 전체 절차. 요구사항 정의서의 **K 형태**([REQUIREMENTS.md](REQUIREMENTS.md) 4-3)다.
+대상: 베어메탈 장비 1대 이상. 장비마다 NIC PF 를 N개 꽂고, PF 하나당
+데이터플레인 인스턴스 하나를 띄운다. 제어부는 그중 한 대(또는 별도 장비)에서
+하나만 돌면서 함대 전체를 관측한다.
 
-> **k8s 없이** 장비에 직접 설치하려면(**S 형태**) → [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md).
-> 1절 호스트 준비까지는 두 형태가 동일하고, k3s 설치 지점부터 갈린다.
-
-> **현재 범위**: 컨테이너 안에서 `rte_eal_init` 이 성공하고 NIC 포트가 인식·start 되며,
-> hello packet 이 선로에 나가는 지점까지(Phase 1)가 완료 기준이다.
-> 시나리오 송신 엔진은 Phase 2 이후다.
+> **오케스트레이터를 쓰지 않는 이유.** 배치를 정하는 주체가 스케줄러가 아니라
+> **PCIe 슬롯**이다. `0000:43:00.0` 을 쓰는 컨테이너는 그 카드가 꽂힌 장비에서만
+> 돌 수 있으므로 스케줄러가 결정할 것이 없다. 코어도 마찬가지로, 커널
+> `isolcpus` 와 **같은 출처를 보는** 명시적 cpuset 이 "5개 달라"고 요청해서
+> 받아쓰는 것보다 정확하다. 근거는 [REQUIREMENTS.md](REQUIREMENTS.md) 4-3 절.
+>
+> 컨테이너 자체는 유지한다 — **목적이 성능이 아니라 재현성**이기 때문이다.
+> 검증기의 gcc 9.4 는 `-march=x86-64-v3` 를 모른다.
 
 ---
 
 ## 0. 계층 분리 — 무엇을 누가 하는가
 
-DPDK 를 컨테이너화하는 이유는 성능이 아니라 **재현성**이다. 그런데 hugepage 크기,
-IOMMU, vfio 바인딩, CPU 격리는 전부 호스트 커널에 묶여 있어 컨테이너가 숨겨주지
-못한다. 이 경계를 헷갈리면 디버깅이 매우 괴로워진다.
-
-| 계층 | 담당 | 컨테이너가 못 하는 일 |
+| 계층 | 담당 | 컨테이너가 대신 못 하는 것 |
 |---|---|---|
-| **호스트 (수동/스크립트)** | BIOS VT-d, 커널 cmdline(iommu·hugepages·isolcpus), vfio-pci 바인딩, hugetlbfs | — |
-| **k8s 노드 설정** | kubelet CPU Manager `static`, Topology Manager `single-numa-node`, reserved CPUs | 호스트 커널 설정 변경 |
-| **k8s 워크로드** | 파드 스케줄링, PF 할당, hugepage 할당량, 코어 배타 점유 | IOMMU·hugepage **생성** |
+| BIOS | VT-d, HT off, C-State off | — |
+| 호스트 커널 | IOMMU, hugepage **생성**, `isolcpus`, vfio 바인딩 | 전부 |
+| Compose | cpuset 고정, 장치 전달, hugepage **소비 상한**, 재시작 | IOMMU·hugepage 생성 |
+| 애플리케이션 | EAL 인자 조립, 포트 구성, 판정 | — |
 
-### 용어 정리 — "k8s docker"
-
-Docker Engine 은 k8s 1.24 부터 CRI 런타임이 아니다. **이미지는 Docker 로 빌드하고
-(OCI 표준), 런타임은 k3s 내장 containerd** 가 실행한다. 개발자 로컬에서
-`docker run` 으로 같은 이미지를 띄우는 것도 그대로 가능하다 (§7 참조).
+호스트 준비는 **장비마다 동일**하고 오케스트레이터 유무와 무관하다.
 
 ---
 
-## 1. 호스트 준비
+## 1. 호스트 준비 (생성 장비마다)
 
-```bash
-cd deploy/host
-chmod +x *.sh      # Windows 에서 체크아웃했다면 실행 비트가 없을 수 있다
-```
+### 1-1. 커널 파라미터 — 재부팅 필요
 
-### 1-1. 커널 파라미터
-
-[deploy/host/10-kernel-cmdline.md](../deploy/host/10-kernel-cmdline.md) 를 따라
-BIOS 와 GRUB 을 설정하고 **재부팅**한다. 요약:
+[deploy/host/10-kernel-cmdline.md](../deploy/host/10-kernel-cmdline.md) 참조.
 
 ```
 intel_iommu=on iommu=pt
 default_hugepagesz=1G hugepagesz=1G hugepages=16
-isolcpus=managed_irq,domain,2-31 nohz_full=2-31 rcu_nocbs=2-31
+isolcpus=managed_irq,domain,2-23 nohz_full=2-23 rcu_nocbs=2-23
 ```
 
-`isolcpus` / `nohz_full` / `rcu_nocbs` 는 **반드시 같은 집합**이고,
-그 여집합이 다음 단계의 `reserved-cpus` 가 된다.
+`isolcpus` 가 이제 **코어 격리의 유일한 출처**다. `.env` 의 `MIR_DP*_CPUSET` 은
+반드시 이 집합 안에 들어가야 하고, `40-verify-node.sh` 가 그걸 검사한다.
+(오케스트레이터를 쓸 때는 `isolcpus` 와 `reserved-cpus` 를 서로 다른 파일에서
+손으로 맞춰야 했다. 그 이중 출처가 사라진 것이 이번 전환의 실질적 이득 하나다.)
+
+hugepage 총량 ≥ `MIR_MEM_MB` × 인스턴스 수 여야 한다. 검증기 기준
+4096MB × 4 = 16GB = `hugepages=16` 으로 딱 맞는다.
 
 ### 1-2. NIC 을 vfio-pci 로 바인딩
 
 ```bash
-# 후보 목록 확인 (BDF, 드라이버, netdev, NUMA 노드)
-sudo ./20-bind-vfio.sh
-
-# 넘길 BDF 를 지정
-sudo ./20-bind-vfio.sh 0000:3b:00.0 0000:3b:00.1
+sudo deploy/host/20-bind-vfio.sh                      # 후보 목록
+sudo deploy/host/20-bind-vfio.sh 0000:43:00.0 0000:43:00.1
 ```
 
-관리용 인터페이스(기본 경로를 가진 NIC)는 자동으로 보호된다 — 실수로 넘기면
-장비 접속이 끊기기 때문이다. 정말 필요하면 `--force`.
+출력의 `<bdf> → /dev/vfio/<group>` 이 그대로 `.env` 의 `MIR_DP*_PF` 와
+`MIR_DP*_VFIO_GROUP` 이 된다.
 
-`driverctl` 이 설치돼 있으면 재부팅 후에도 유지된다. 없으면 경고가 뜨고
-바인딩이 휘발되므로 `sudo apt install driverctl` 후 다시 실행할 것.
+> ⚠️ 관리 NIC 을 넘기면 SSH 가 끊긴다. 스크립트가 기본 라우트 netdev 를
+> 보호하지만 `--force` 로 무력화할 수 있으니 주의할 것.
 
-### 1-3. k3s 설치
+> PTP 를 쓸 계획이면 **바인딩 전에** `ethtool -T` 로 하드웨어 타임스탬핑을
+> 확인해 둔다. vfio 로 넘긴 뒤에는 커널이 그 포트를 더 이상 보지 못한다.
+
+### 1-3. Docker 설치
 
 ```bash
-sudo ./30-install-k3s.sh                 # reserved-cpus 기본값 0,1
-sudo RESERVED_CPUS=0-3 ./30-install-k3s.sh
+sudo deploy/host/30-install-docker.sh
 ```
-
-`/etc/rancher/k3s/config.yaml` 에 다음이 들어간다:
-
-| 설정 | 왜 |
-|---|---|
-| `cpu-manager-policy=static` | Guaranteed QoS + 정수 cpu 컨테이너에 **배타 코어** 할당. 없으면 busy-poll 이 의미를 잃는다 |
-| `reserved-cpus=0,1` | static 정책의 필수 조건. `isolcpus` 의 여집합과 맞춘다 |
-| `topology-manager-policy=single-numa-node` | CPU·hugepage·vfio 를 같은 NUMA 노드로 정렬. 100G 목표에서는 필수 |
 
 ### 1-4. 사전조건 점검
 
 ```bash
-./40-verify-node.sh
+deploy/host/40-verify-node.sh
+# 장비 2대 이상이면:
+MIR_REQUIRE_PTP=1 deploy/host/40-verify-node.sh
 ```
 
-FAIL 이 하나라도 있으면 다음 단계로 넘어가지 않는다. §6 트러블슈팅 참조.
+FAIL 이 하나라도 있으면 진행하지 않는다. 여기서 걸러지는 문제는 나중에
+"왜 안 뜨지"로 모습만 바뀔 뿐 사라지지 않는다.
 
 ---
 
 ## 2. 이미지 빌드
 
-빌드 컨텍스트는 **저장소 루트**다 (세 이미지가 `proto/` 를 공유한다).
+빌드 컨텍스트는 **저장소 루트**다 (`proto/` 를 함께 넣어야 한다).
 
 ```bash
-cd <저장소 루트>
-
 docker build -f deploy/docker/Dockerfile.dataplane -t mir/dataplane:dev .
-docker build -f deploy/docker/Dockerfile.agent     -t mir/agent:dev .
-docker build -f deploy/docker/Dockerfile.control   -t mir/control:dev .
+docker build -f deploy/docker/Dockerfile.agent     -t mir/agent:dev     .
+docker build -f deploy/docker/Dockerfile.control   -t mir/control:dev   .
 ```
 
-k3s 는 containerd 를 쓰므로 로컬 Docker 이미지가 자동으로 보이지 않는다.
-가져다 넣어야 한다:
+데이터플레인 이미지는 DPDK 를 소스에서 빌드하므로 수 분 걸린다.
+
+### 장비가 여러 대일 때
+
+레지스트리를 하나 두거나 이미지를 실어 나른다.
 
 ```bash
-for img in dataplane agent control; do
-  docker save mir/$img:dev | sudo k3s ctr images import -
-done
+docker save mir/dataplane:dev mir/agent:dev | ssh gen-2 'docker load'
 ```
 
-### 빌드에서 주의할 점
-
-- **DPDK 버전이 `--build-arg DPDK_VERSION` 으로 고정**된다. 배포판 패키지 버전은
-  베이스 이미지 갱신에 따라 조용히 바뀌는데, 컨테이너화의 목적 자체가 재현성이라
-  그 변동을 허용하지 않는다.
-- **`-march=native` 는 금지다.** 빌드 머신과 실행 머신의 CPU 가 다르면 SIGILL 로
-  죽는다. 기본값은 `x86-64-v3` 이며 Phase 7 에서 타깃이 확정되면 올린다.
-- 데이터플레인 이미지에 **C++ 런타임이 들어가면 안 된다.** gRPC 는 Go 사이드카가
-  담당하므로 libstdc++·abseil·BoringSSL 이 보인다면 설계가 새고 있다는 신호다.
+> `-march=x86-64-v3` 로 빌드되므로 **Haswell 이상**에서만 돈다. 장비 간 CPU
+> 세대가 다르면 낮은 쪽에 맞춰야 한다 (`--build-arg MARCH=`).
 
 ---
 
 ## 3. 코드 생성 (proto 를 고쳤을 때만)
 
 ```bash
-# Go — 생성물은 control/internal/pb/ 에 떨어지고 커밋한다
-buf lint
-buf generate
-
-# C — 이미지 빌드 중 meson custom_target 이 자동 실행하므로 수동 실행은 불필요
+buf generate          # Go — control/internal/pb/ 에 떨어지고 커밋한다
 ```
 
-`.proto` 하나가 두 hop 을 모두 정의한다. 사이드카가 대부분의 필드를 그대로
-통과시키는 릴레이라, 스키마를 하나로 유지하면 두 hop 이 갈라질 여지가 없다.
+C 쪽은 이미지 빌드 중 meson `custom_target` 이 자동 실행하므로 수동 실행이
+필요 없다.
 
 ---
 
-## 4. 배포
+## 4. 인증서 발급
 
-**순서가 중요하다.** device plugin 이 먼저 떠서 `mir.io/dpdk_pf` 를 노출해야
-데이터플레인 파드가 스케줄된다.
+사이드카 포트(`:9100~`)는 장비 밖으로 열린다. **여기 닿는 누구나 라인레이트
+패킷 제너레이터를 조종할 수 있으므로** mTLS 가 기본이다.
 
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-
-# ① device plugin 설정 — pciAddresses 를 실물에 맞게 먼저 수정할 것
-vi deploy/k8s/overlays/baremetal/sriovdp-config.yaml
-kubectl apply -f deploy/k8s/overlays/baremetal/sriovdp-config.yaml
-
-# ② device plugin DaemonSet — 태그를 확인해서 적용
-#    https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin/releases
-kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/sriov-network-device-plugin/<TAG>/deployments/sriovdp-daemonset.yaml
-
-# ③ 리소스가 실제로 노출됐는지 — 여기서 0 이면 아래는 전부 Pending 된다
-kubectl get node -o jsonpath='{.items[0].status.allocatable}' | tr ',' '\n' | grep dpdk_pf
-
-# ④ Mir 배포
-kubectl apply -k deploy/k8s/overlays/baremetal
+./deploy/host/50-gen-certs.sh certs/ 10.10.40.121 10.10.40.122
 ```
 
-자세한 내용은 [deploy/k8s/overlays/README.md](../deploy/k8s/overlays/README.md).
+장비 주소는 `fleet.yaml` 의 `address` 와 **정확히 같아야 한다** — TLS 가 그
+값을 서버 이름으로 검증하고, 스크립트가 그 값을 IP SAN 으로 넣는다.
 
-> `deploy/k8s/base` 를 단독으로 apply 하지 말 것. 리소스가 비어 있어 데이터플레인이
-> BestEffort QoS 로 뜨고 배타 코어도 NIC 도 받지 못한다.
+배치:
+
+| 장비 | 파일 |
+|---|---|
+| 생성 장비 | `ca.crt`, `agent-<주소>.crt` → `agent.crt`, `agent-<주소>.key` → `agent.key` |
+| 제어 장비 | `ca.crt`, `control.crt`, `control.key` |
+
+개발 중 끄려면 `.env` 에 `MIR_INSECURE=1`. 인증서 경로와 **함께 쓰면 기동을
+거부한다** — "보안을 켰다고 믿는 채로 평문이 나가는" 상태가 가장 나쁜 결과라
+의도적으로 막아 둔 것이다.
 
 ---
 
-## 5. 검증
+## 5. 배포
 
-### 1단계 — 호스트 사전조건
-
-```bash
-./deploy/host/40-verify-node.sh
-```
-
-### 2단계 — k8s 노드
+### 5-1. 생성 장비 (장비마다)
 
 ```bash
-kubectl get node -o jsonpath='{.items[0].status.allocatable}' | tr ',' '\n'
-# hugepages-1Gi 와 mir.io/dpdk_pf 가 보여야 한다
+cd deploy/compose
+cp dataplane.env.example .env
+$EDITOR .env          # MIR_MACHINE, cpuset, BDF, vfio 그룹, 포트
 ```
 
-### 3단계 — 데이터플레인 컨테이너 (Phase 0 완료 기준)
+**첫 기동은 인스턴스 하나로 한다.**
 
 ```bash
-kubectl -n mir logs deploy/mir-dataplane -c dataplane
-#   rte_eal_init 성공, port N개 인식,
-#   "port N 준비 완료: rxq=1(...) txq=1(...)" 로그가 나와야 한다
-#   그 뒤 링크 상태 한 줄 — "Link up at 100 Gbps FDX Autoneg" 형태
-
-kubectl -n mir exec deploy/mir-dataplane -c dataplane -- \
-    cat /sys/fs/cgroup/cpuset.cpus.effective     # 배타 코어 5개
-
-kubectl -n mir exec deploy/mir-dataplane -c dataplane -- env | grep PCIDEVICE
-kubectl -n mir describe pod -l app=mir-dataplane | grep -i qos    # Guaranteed
+COMPOSE_PROFILES= docker compose -f docker-compose.dataplane.yml up -d
+docker logs -f "$(grep ^MIR_MACHINE .env | cut -d= -f2)-dp0"
 ```
 
-컨테이너 안에서 장치 상태를 직접 볼 수도 있다:
+확인되면 늘린다 (`.env` 의 `COMPOSE_PROFILES` 가 적용된다).
 
 ```bash
-kubectl -n mir exec deploy/mir-dataplane -c dataplane -- \
-    python3 /usr/local/bin/dpdk-devbind.py --status
+docker compose -f docker-compose.dataplane.yml up -d
 ```
 
-### 3-1단계 — hello packet 송신 (Phase 1 완료 기준)
-
-`MIR_HELLO_TX_COUNT` 가 설정된 경우에만 기동 직후 1회 송신한다. 기본값은 0 —
-**파드가 뜨기만 해도 선로에 프레임이 나가는 상황을 만들지 않기 위해** 매니페스트에
-넣지 않고 검증할 때만 켠다.
-
-| 환경변수 | 기본값 | 뜻 |
-|---|---|---|
-| `MIR_HELLO_TX_COUNT` | `0`(비활성) | 보낼 패킷 수 |
-| `MIR_HELLO_TX_PORT`  | `0` | 대상 포트 id (`probe` 로그의 port 번호) |
-| `MIR_HELLO_DST_MAC`  | 브로드캐스트 | 목적지 MAC. 직결이면 상대 NIC 의 MAC 을 주는 편이 낫다 |
-| `MIR_HELLO_PKT_SIZE` | `64` | FCS 제외 프레임 길이 (30~1514 로 클램프) |
-| `MIR_HELLO_BURST`    | `32` | `tx_burst` 한 번에 넣는 개수 (1~512) |
+### 5-2. 제어 장비 (한 대)
 
 ```bash
-kubectl -n mir set env deploy/mir-dataplane -c dataplane MIR_HELLO_TX_COUNT=1000
-kubectl -n mir logs deploy/mir-dataplane -c dataplane | grep hello
-#   hello 송신 완료: 1000/1000 전송, 0 폐기 (64000 bytes)
-
-# 검증이 끝나면 반드시 되돌린다
-kubectl -n mir set env deploy/mir-dataplane -c dataplane MIR_HELLO_TX_COUNT-
+cd deploy/compose
+cp fleet.example.yaml fleet.yaml
+$EDITOR fleet.yaml    # 장비·인스턴스·PF 목록
+docker compose -f docker-compose.control.yml up -d
 ```
 
-프레임은 EtherType **0x88B5**(IEEE 로컬 실험용) 이고 페이로드는 `MIR1` +
-be32 seq + be64 송신시각(ns) 으로 시작한다. 상대 장비/미러 포트에서:
+> `fleet.yaml` 의 `machines[].name` 과 각 생성 장비 `.env` 의 `MIR_MACHINE` 이
+> 같아야 한다. 인스턴스 이름이 `<machine>-dp<id>` 로 만들어지고 제어부가 그
+> 이름으로 기대와 실측을 잇는다. 어긋나면 전부 `unreachable` 로 보인다.
+
+---
+
+## 6. 검증
+
+### 1단계 — 호스트
 
 ```bash
-tcpdump -i <if> -XX 'ether proto 0x88b5'
+deploy/host/40-verify-node.sh
 ```
 
-**"전송 완료" 로그만으로는 부족하다.** 그건 큐에 넣는 데 성공했다는 뜻이지
-선로에 나갔다는 뜻이 아니다. 아래 둘 중 하나로 NIC 카운터까지 확인할 것:
+### 2단계 — 데이터플레인 기동 (Phase 0 완료 기준)
 
 ```bash
-# 텔레메트리(하드웨어 카운터를 그대로 싣는다)
-grpcurl -plaintext localhost:9100 mir.v1.DataPlane/StreamTelemetry | head
-
-curl -s localhost:8080/api/dataplanes | jq '.[].stats'
+docker logs gen-1-dp0
 ```
 
-`tx_pkts` 가 보낸 수와 맞지 않거나 `tx_err` 가 늘면 링크·MTU·오프로드를 의심한다.
-`폐기` 가 0 이 아니면 링크가 down 이거나 TX 디스크립터 회수가 막힌 것이다.
+나와야 하는 것:
+
+```
+  lcores      : 2,3,4,5,6  (5개, cpuset 에서 읽음)
+  device      : pci:0000:43:00.0
+  memory      : 4096 MB  (NUMA 노드 1개 중 node0 에 배정)
+  EAL argv    : mir-dataplane -l 2,3,4,5,6 --file-prefix gen-1-dp0
+                --proc-type=primary --socket-mem 4096 --socket-limit 4096
+                -a 0000:43:00.0
+...
+rte_eal_init 성공 (main lcore=2, lcore 수=5)
+포트 1개 인식
+port 0: driver=net_i40e mac=... numa=0 ...
+```
+
+**`lcores` 가 `.env` 의 `MIR_DP0_CPUSET` 과 정확히 일치**해야 한다. 다르면
+cpuset 이 안 먹은 것이고, 그 상태로는 배타 코어 배치가 통째로 무의미하다.
+
+`memory` 줄이 "상한 없음"이면 `MIR_MEM_MB` 가 안 들어간 것이다. 인스턴스를
+여러 개 띄울 계획이면 여기서 멈추고 고친다 — 먼저 뜬 쪽이 hugepage 를 전부
+가져간다.
+
+### 3단계 — 사이드카 연결
+
+```bash
+docker logs gen-1-agent0
+# "데이터플레인 연결됨" → "데이터플레인 준비 확인 ports=1 ..."
+```
+
+`ports=0` 이면 **SERVING 으로 올라가지 않는다.** 이건 버그가 아니라 의도된
+동작이다 — 데이터플레인은 NIC 을 못 잡아도 진단을 위해 계속 살아 있으므로,
+"살아 있음"이 "정상"으로 오해되지 않도록 사이드카가 막는다.
 
 ### 4단계 — 코어 분리 (사이드카 설계의 핵심 검증)
 
 ```bash
-kubectl -n mir exec deploy/mir-dataplane -c dataplane -- cat /sys/fs/cgroup/cpuset.cpus.effective
-kubectl -n mir exec deploy/mir-dataplane -c agent     -- cat /sys/fs/cgroup/cpuset.cpus.effective
+# 데이터플레인은 격리 코어에만
+docker inspect -f '{{.HostConfig.CpusetCpus}}' gen-1-dp0
+
+# 사이드카는 제한 없음 = 공유 풀
+docker inspect -f '{{.HostConfig.CpusetCpus}}' gen-1-agent0
+
+# 실제 스레드 배치
+docker top gen-1-dp0 -o pid,psr,comm
 ```
 
-**두 cpuset 이 겹치면 안 된다.** 겹쳤다면 사이드카의 gRPC 스레드가 DPDK 의
-busy-poll 코어를 선점할 수 있다는 뜻이고, 대개 원인은 `agent` 의 cpu 요청을
-실수로 정수(`"1"`)로 준 것이다 — 분수(`500m`)여야 공유 풀에 남는다.
+사이드카 스레드가 데이터플레인 코어에 올라가 있으면 격리가 깨진 것이다.
 
-### 5단계 — 채널 연결
+### 5단계 — 제어부에서 함대 보기
 
 ```bash
-# ③ unix socket
-kubectl -n mir exec deploy/mir-dataplane -c agent -- ls -l /var/run/mir/dp.sock
-
-# ④ gRPC
-kubectl -n mir port-forward deploy/mir-dataplane 9100:9100 &
-grpcurl -plaintext localhost:9100 list
-grpcurl -plaintext localhost:9100 mir.v1.DataPlane/Hello   # 포트 목록이 나와야 한다
-
-# 제어부
-kubectl -n mir port-forward svc/mir-control 8080:80 &
-curl -s localhost:8080/healthz | jq
-# {"ok":true,"version":"0.1.0","connected":1,"total":1}
+curl -s localhost:8080/healthz | jq          # liveness — 항상 200
+curl -s localhost:8080/readyz  | jq          # 기대한 인스턴스가 다 붙었는가
+curl -s localhost:8080/api/capacity | jq     # 장비 단위 롤업
+curl -s localhost:8080/api/dataplanes | jq   # 인스턴스 단위 상세
 ```
 
-### 6단계 — 개수·리소스 조정
+`state` 가 넷으로 갈린다. **이 구분이 오케스트레이터를 걷어내며 오히려 좋아진
+부분이다** — 기대(설정)와 실측(HelloResponse)을 따로 들고 대조하기 때문이다.
+노드 allocatable 합산으로는 "파드 몇 개가 Ready 인가"밖에 알 수 없었다.
 
-```bash
-curl -s localhost:8080/api/capacity | jq
-curl -s localhost:8080/api/dataplanes | jq
-
-# 개수 조정 — 무중단 (제어부·GUI 영향 없음)
-curl -XPUT localhost:8080/api/dataplanes/scale -d '{"replicas":2}'
-kubectl -n mir get pod -l app=mir-dataplane -w
-
-# 상한 초과는 400 으로 거절되어야 한다 (조용히 Pending 으로 새면 안 된다)
-curl -XPUT localhost:8080/api/dataplanes/scale -d '{"replicas":99}'
-
-# 리소스 조정 — 데이터플레인만 롤링 재생성
-curl -XPUT localhost:8080/api/dataplanes/resources -d '{"cpu":"7"}'
-kubectl -n mir rollout status deploy/mir-dataplane
-curl -s localhost:8080/healthz | jq    # 자동 재연결까지 확인
-```
-
----
-
-## 6. 운영 메모 — 개수·리소스 조정의 성질
-
-**"무중단 변경"은 달성 불가능하다.** 세 겹의 제약이 겹쳐 있다.
-
-1. Pod 의 `spec.containers` 는 불변 — 컨테이너 개수 변경 = Pod 재생성
-2. in-place resize(k8s 1.33 beta)는 **static CPU manager + Guaranteed 조합에서
-   `Infeasible`** 로 마킹된다. 우리는 배타 코어를 위해 그 조합이 필수다.
-   `hugepages-*` 와 device plugin 확장 리소스는 애초에 resize 대상도 아니다
-3. **DPDK 가 런타임 lcore 변경을 지원하지 않는다** — `rte_eal_init` 이 lcore 집합을
-   프로세스 생존 기간 동안 고정하고 mempool 도 그때 확보한다
-
-그래서 목표는 "무중단"이 아니라 **재시작 범위를 데이터플레인으로만 한정**하는
-것이고, 제어부가 별도 파드에 있어야 그게 성립한다.
-
-| 요구 | 실현 | 제어부·GUI 영향 |
+| state | 뜻 | 볼 곳 |
 |---|---|---|
-| 개수 설정 | `Deployment/scale` patch | 없음 |
-| CPU/메모리 설정 | pod template patch → 데이터플레인만 롤링 재생성 | 없음 |
-| 특정 데이터플레인 재시작 | 해당 Pod delete | 없음 |
+| `ok` | 설정한 PF 를 실제로 잡았다 | — |
+| `unreachable` | 연결 자체가 안 된다 | 컨테이너 상태, 방화벽, 포트, 인증서 |
+| `no-ports` | 떠 있는데 NIC 을 못 잡았다 | vfio 바인딩, `MIR_DEVICE_SPEC` |
+| `pf-mismatch` | 다른 PF 를 잡았다 | `.env` 와 `fleet.yaml` 의 BDF 불일치 |
 
-재시작 동안 텔레메트리 스트림은 끊기지만, 제어부가 EndpointSlice 를 조회하고
-있으므로 새 파드가 뜨면 **자동으로 재연결된다**. 별도 조작이 필요 없다.
+### 6단계 — hello packet 송신 (Phase 1 완료 기준)
 
----
-
-## 7. 로컬 개발 — k8s 없이 컨테이너 경로만 검증
-
-k8s 계층의 문제와 DPDK 계층의 문제를 분리해서 디버깅할 수 있다.
+> ⚠️ **실제로 선로에 프레임이 나간다.** 본인 소유/승인된 링크에서만 할 것.
 
 ```bash
-# 데이터플레인 — device plugin 없이 BDF 를 직접 지정
-docker run --rm -it \
-  --cpuset-cpus 2-6 \
-  -v /dev/hugepages:/dev/hugepages \
-  -v /dev/vfio:/dev/vfio \
-  -v mir-ipc:/var/run/mir \
-  --cap-add IPC_LOCK --cap-add SYS_NICE \
-  -e MIR_DEVICE_SPEC=pci:0000:3b:00.0 \
-  -e MIR_HELLO_TX_COUNT=1000 \
-  mir/dataplane:dev
-
-# 사이드카 — 같은 볼륨에 붙인다
-docker run --rm -it \
-  -v mir-ipc:/var/run/mir \
-  -p 9100:9100 \
-  mir/agent:dev
-
-grpcurl -plaintext localhost:9100 mir.v1.DataPlane/Hello
+docker compose -f docker-compose.dataplane.yml stop dp0
+MIR_HELLO_TX_COUNT=1000 docker compose -f docker-compose.dataplane.yml up -d dp0
+docker logs gen-1-dp0 | grep hello
+#   hello 송신 완료: 1000/1000 전송, 0 폐기 (64000 bytes)
 ```
 
-`MIR_DEVICE_SPEC` 는 device plugin 이 주입하는 `PCIDEVICE_*` 를 대신하는
-수동 지정 통로다. `MIR_HELLO_TX_COUNT` 는 기동 직후 hello packet 을 한 번
-내보낸다 — 표는 5절 3-1단계 참조. **선로에 실제로 프레임이 나가므로**
-대상 링크가 본인 소유/테스트 승인된 것인지 확인하고 켤 것.
+기본값이 0 이라 평소에는 기동만으로 프레임이 나가지 않는다. 검증 후 되돌린다.
+
+### 7단계 — 장비 2대 (멀티 장비 구성일 때만)
+
+```bash
+# 두 장비의 인스턴스가 모두 붙는가
+curl -s localhost:8080/api/capacity | jq '.machines'
+
+# 한 대의 컨테이너를 죽여 unreachable 로 잡히는지
+ssh gen-2 'docker stop gen-2-dp0'
+curl -s localhost:8080/api/dataplanes | jq '.[] | select(.state != "ok")'
+
+# 평문 접속이 거부되는지 (mTLS 회귀 테스트) — 실패해야 정상이다
+grpcurl -plaintext 10.10.40.121:9100 list
+
+# 시계 동기
+journalctl -u 'ptp4l@*' | grep 'master offset' | tail -5
+```
 
 ---
 
-## 8. 트러블슈팅
+## 7. 트러블슈팅
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| `VFIO group not viable` | 같은 IOMMU 그룹의 다른 장치가 커널 드라이버 사용 중 | `20-bind-vfio.sh` 가 경고를 출력한다. 동거 장치도 vfio-pci 로 넘기거나 unbind |
-| `Cannot get hugepage information` | hugepage 미예약 또는 hugetlbfs 미마운트 | `10-kernel-cmdline.md` 적용 후 재부팅. `grep Huge /proc/meminfo` 확인 |
-| `EAL: No available 1048576 kB hugepages` | 다른 파드가 이미 소진 | `kubectl -n mir get pod` 로 중복 실행 확인. `hugepages=` 값을 늘린다 |
-| 데이터플레인 파드가 계속 `Pending` | `mir.io/dpdk_pf` 부족 | `kubectl describe pod` 의 이벤트 확인. device plugin 이 떴는지, `replicas` 가 PF 개수를 넘지 않는지 |
-| 리소스 변경 후 새 파드가 `Pending` 에서 멈춤 | `maxSurge` 가 0 이 아님 | PF 가 배타 자원이라 먼저 죽여야 반납된다. `strategy.rollingUpdate.maxSurge: 0` 확인 |
-| lcore 개수가 예상과 다름 | cpuset 이 반영되지 않음 | 파드가 Guaranteed QoS 인지, `cpu` 가 **정수**인지 확인. `cpu_manager_state` 도 점검 |
-| kubelet 이 기동 실패 | `cpu-manager-policy` 를 나중에 변경 | `sudo rm /var/lib/kubelet/cpu_manager_state && sudo systemctl restart k3s` |
-| `port N 구성 실패: dev_start ...` | 큐/디스크립터 설정을 PMD 가 거부 | 로그의 사유 문자열이 그대로 원인이다. 대개 hugepage 부족(mempool 생성 실패)이거나 PMD 가 요구하는 최소 디스크립터 수 미달 |
-| hello 가 `... 폐기` 로 끝남 | 링크 down 또는 TX 디스크립터 회수 정지 | `mir_port_wait_link` 로그를 먼저 볼 것. 링크가 up 인데도 폐기되면 상대 장비의 flow control(PAUSE) 을 의심 |
-| hello 는 "전송 완료" 인데 상대가 못 받음 | 큐 적재까지만 성공 | 텔레메트리의 `tx_pkts`(NIC 하드웨어 카운터)를 확인. 0 이면 선로에 안 나간 것. 스위치 경유면 0x88B5 프레임을 거르는 정책이 있는지도 확인 |
-| 포트는 probe 되는데 링크 다운 | SFP 모듈 비호환 | Intel 계열은 펌웨어가 비(非)Intel 광모듈을 거부할 수 있다. 케이블·모듈 교체로 확인 |
-| `dp.sock` 이 없다 | C 가 아직 EAL 초기화 중이거나 `ipc` 볼륨 마운트 누락 | 사이드카는 이 상태를 정상으로 보고 재시도한다. 수 초 뒤에도 없으면 dataplane 컨테이너 로그 확인 |
-| 사이드카가 `NOT_SERVING` 에서 안 벗어남 | C 데이터플레인이 뜨지 못함 | `kubectl logs -c dataplane` 확인. readiness 가 의도적으로 이 상태를 반영한다 |
-| 인식된 포트가 0개 | device plugin 이 PCI 주소를 주입하지 않음 | `env | grep PCIDEVICE` 확인. `sriovdp-config.yaml` 의 `pciAddresses` 점검 |
-| 제어부가 403/Forbidden | RBAC 누락 | `control-rbac.yaml` 이 적용됐는지, ServiceAccount 가 파드에 붙었는지 확인 |
+| `rte_eal_init 실패` + hugepage 언급 | 상한 × 인스턴스 수 > 호스트 총량 | `MIR_MEM_MB` 를 낮추거나 `hugepages=` 를 올린다 |
+| `EAL: ... group not viable` | IOMMU 그룹에 커널 드라이버를 쓰는 다른 장치가 있다 | 같은 그룹의 장치를 전부 vfio 로 넘기거나 슬롯을 옮긴다 |
+| 포트 0개 인식 | vfio 미바인딩 / BDF 오타 | `ls /dev/vfio/`, `.env` 의 `MIR_DP*_PF` 확인 |
+| `lcores` 가 `.env` 와 다름 | cpuset 미적용 (cgroup v1 등) | `docker info --format '{{.CgroupVersion}}'` 확인 |
+| 인스턴스 2개째부터 기동 실패 | hugepage 경쟁 | `MIR_MEM_MB` 총합 재계산 |
+| `unreachable` (전부) | `MIR_MACHINE` ≠ `fleet.yaml` 의 name | 두 값을 일치시킨다 |
+| `unreachable` (일부) | 포트 불일치, 방화벽 | `.env` 의 `MIR_DP*_PORT` 와 `fleet.yaml` 의 `port` |
+| TLS 핸드셰이크 실패 | SAN 에 그 주소가 없다 | `fleet.yaml` 의 address 로 인증서를 다시 발급 |
+| 제어부 기동 실패 | 함대 설정 없음/오타 | `MIR_FLEET_CONFIG` 경로 확인. 오타 난 키는 파싱 단계에서 거부된다 |
 
-### IOMMU 를 못 켠 경우
+### 개수·리소스를 바꾸려면
 
-BIOS 에 VT-d 가 없으면 no-IOMMU 폴백을 쓴다. **대가를 인지할 것**: 컨테이너가
-임의 물리 메모리에 DMA 할 수 있게 되어 파드 격리 경계가 사실상 사라지고,
-데이터플레인 컨테이너를 `privileged: true` 로 돌려야 한다.
+제어부에 그런 API 는 **없다**. Compose 파일과 `.env` 가 소유한다.
 
-`deploy/k8s/overlays/baremetal/dataplane-resources.yaml` 의 `securityContext` 를
-그에 맞게 수정하고, **이 사실을 여기 기록해 두어야** 이후 디버깅이 쉽다.
+```bash
+$EDITOR .env                                            # cpuset, MIR_MEM_MB
+docker compose -f docker-compose.dataplane.yml up -d    # 바뀐 것만 재생성
+```
+
+DPDK 는 런타임 lcore 변경을 지원하지 않으므로(`rte_eal_init` 이 고정한다)
+어떤 방식이든 재시작을 수반한다. 그래서 선언적 파일이 맞는 자리다. 제어부에
+라이프사이클 권한을 주지 않는 이유는 `control/internal/api` 패키지 주석 참조 —
+요약하면 그러려면 장비마다 `docker.sock`(root 등가)을 받아야 하는데, GUI 가
+웹으로 노출되는 구조에서 명백한 후퇴이고 멀티 장비에서는 애초에 성립하지 않는다.
 
 ---
 
 ## 관련 문서
 
-- [REQUIREMENTS.md](REQUIREMENTS.md) — 요구사항·설계의 단일 출처
-- [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md) — k8s 없이 장비에 직접 설치(S 형태)
-- [deploy/k8s/overlays/README.md](../deploy/k8s/overlays/README.md) — 환경별 오버레이,
-  클라우드 이식 시 무엇을 바꿔야 하는지
+- [REQUIREMENTS.md](REQUIREMENTS.md) — 요구사항·설계·미확정 이슈 (SoT)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 채널 구조와 모듈 분해
+- [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md) — 컨테이너 없이 systemd 로 (S 형태)
 - [deploy/host/10-kernel-cmdline.md](../deploy/host/10-kernel-cmdline.md) — 커널 파라미터 상세
+- [deploy/host/60-ptp.md](../deploy/host/60-ptp.md) — 장비 간 시계 동기

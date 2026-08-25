@@ -1,25 +1,25 @@
-# 설치 가이드 — 단독 실행 형태 (k8s 없음)
+# 설치 가이드 — 단독 실행 형태 (컨테이너 없음)
 
-베어메탈 장비 한 대에 **k8s 없이** Mir 를 설치한다.
+베어메탈 장비 한 대에 **컨테이너 없이** Mir 를 설치한다.
 요구사항 정의서의 **S 형태**([REQUIREMENTS.md](REQUIREMENTS.md) 4-3-5)에 해당한다.
 
-> k8s 로 배포하려면 이 문서가 아니라 [DEPLOYMENT.md](DEPLOYMENT.md) 를 본다.
+> 정본 형태(Docker Compose)로 배포하려면 이 문서가 아니라 [DEPLOYMENT.md](DEPLOYMENT.md) 를 본다.
 
 ## 0. 범위 — 무엇을 얻고 무엇을 못 얻는가
 
-두 형태는 **호스트 준비까지 완전히 동일**하고, k3s 를 설치하는 지점에서 갈린다.
+두 형태는 **호스트 준비까지 완전히 동일**하고, 컨테이너 런타임을 설치하는 지점에서 갈린다.
 
 ```
 [공통] 10-kernel-cmdline.md → 20-bind-vfio.sh
            │
-           ├─ K 형태 → 30-install-k3s.sh → 이미지 빌드 → kubectl apply   (DEPLOYMENT.md)
+           ├─ D 형태 → 30-install-docker.sh → 이미지 빌드 → compose up   (DEPLOYMENT.md)
            └─ S 형태 → 네이티브 빌드 → systemd 유닛 → systemctl start   (이 문서)
 ```
 
 | 이 문서로 얻는 것 | 아직 못 얻는 것 |
 |---|---|
 | `mir-dataplane` 기동, NIC 포트 인식·start, 링크 확인 | **GUI** (Phase 6 미착수) |
-| `mir-agent` 를 통한 gRPC 접근 (Hello / 텔레메트리) | **mir-control** — 현재 k8s 없이는 기동하지 않는다 (7절) |
+| `mir-agent` 를 통한 gRPC 접근 (Hello / 텔레메트리) | **mir-control** — 이제 기동한다 (7절) |
 | Phase 1 hello packet 송신 검증 | 시나리오 송신 엔진 (Phase 2~4-1 미구현) |
 
 즉 이 단계의 운용 창구는 `systemctl` + `journalctl` + `grpcurl` 이다.
@@ -53,15 +53,15 @@ sudo ./deploy/host/20-bind-vfio.sh                    # 후보 목록
 sudo ./deploy/host/20-bind-vfio.sh 0000:3b:00.0       # 바인딩
 ```
 
-스크립트 수정은 필요 없다. 마지막 줄의 `다음: ./30-install-k3s.sh` 안내와
+스크립트 수정은 필요 없다. 마지막 줄의 `다음: ./30-install-docker.sh` 안내와
 `sriovdp-config.yaml 에 반영할 것` 안내는 **S 형태에서 무시**한다. 대신 출력된 BDF 를
 3절의 인스턴스 설정 파일에 적는다.
 
 `driverctl` 이 설치돼 있어야 재부팅 후에도 바인딩이 유지된다(`sudo apt install driverctl`).
 
-### 1-3. k3s 설치 — 건너뛴다
+### 1-3. Docker 설치 — 건너뛴다
 
-`30-install-k3s.sh` 는 실행하지 않는다.
+`30-install-docker.sh` 는 실행하지 않는다.
 
 ### 1-4. 사전조건 점검
 
@@ -70,7 +70,7 @@ sudo ./deploy/host/20-bind-vfio.sh 0000:3b:00.0       # 바인딩
 ```
 
 이 스크립트는 K 형태 기준이라 **1~3절(커널/IOMMU · Hugepage · vfio 바인딩)만 유효**하다.
-4절(k8s 노드)·5절(kubelet 정책)은 FAIL 로 나오는 것이 정상이며, 그 때문에 **종료 코드가
+4절(Docker)은 FAIL 로 나오는 것이 정상이며, 그 때문에 **종료 코드가
 1 이 되므로 신뢰하지 말 것**. 1~3절에 FAIL 이 없으면 다음으로 넘어간다.
 
 ---
@@ -143,7 +143,7 @@ go build -o /tmp/mir-agent ./cmd/mir-agent
 sudo install -m 0755 /tmp/mir-agent /usr/local/bin/mir-agent
 ```
 
-**`mir-control` 은 이 단계에서 빌드하지 않는다** — 현재 k8s 없이는 기동하지 못한다(7절).
+`mir-control` 도 함께 빌드할 수 있다 — 오케스트레이터 없이 기동한다(7절).
 
 ---
 
@@ -152,7 +152,7 @@ sudo install -m 0755 /tmp/mir-agent /usr/local/bin/mir-agent
 | 경로 | 내용 | K 형태의 무엇에 대응 |
 |---|---|---|
 | `/usr/local/bin/mir-dataplane`, `/usr/local/bin/mir-agent` | 바이너리 | 컨테이너 이미지 |
-| `/etc/mir/dp-<N>.env` | 인스턴스별 설정 | 파드 `env:` |
+| `/etc/mir/dp-<N>.env` | 인스턴스별 설정 | compose `environment:` |
 | `/run/mir/dp-<N>.sock` | 채널 ③ unix socket | `ipc` emptyDir |
 | `/var/lib/mir/pcap/` | 리플레이 PCAP (Phase 4-1) | `mir-pcap` PVC |
 
@@ -169,7 +169,7 @@ sudo mkdir -p /etc/mir /var/lib/mir/pcap
 #   같으면 hugetlbfs 파일이 충돌해 두 번째 프로세스가 뜨지 못한다 (6절).
 HOSTNAME=mir-dp-0
 
-# 20-bind-vfio.sh 가 출력한 BDF. device plugin 의 PCIDEVICE_* 를 대신한다.
+# 20-bind-vfio.sh 가 출력한 BDF.
 MIR_DEVICE_SPEC=pci:0000:3b:00.0
 
 # 채널 ③ 소켓. 사이드카가 같은 값을 봐야 한다.
@@ -285,7 +285,7 @@ After=mir-dataplane@%i.service mir-agent@%i.service
 WantedBy=multi-user.target
 ```
 
-### 4-5. k8s 가 하던 일과의 대응
+### 4-5. 컨테이너가 하던 일과의 대응
 
 | K 형태 | S 형태 |
 |---|---|
@@ -295,7 +295,7 @@ WantedBy=multi-user.target
 | `terminationGracePeriodSeconds: 30` | `TimeoutStopSec=30` |
 | `ipc` emptyDir | `/run/mir` (tmpfiles.d) |
 | `mir-pcap` PVC | `/var/lib/mir/pcap` |
-| 파드 재시작 정책 | `Restart=on-failure` |
+| 컨테이너 재시작 정책 | `Restart=on-failure` |
 
 ### 4-6. 실행 사용자
 
@@ -368,7 +368,7 @@ journalctl -u mir-dataplane@0 | grep hello
 환경변수 표 · tcpdump 확인 · NIC 카운터 대조 방법은 중복해 적지 않는다 →
 [DEPLOYMENT.md](DEPLOYMENT.md) 5절 **3-1단계**.
 
-**검증이 끝나면 반드시 이 줄을 지운다.** 파드/서비스가 뜰 때마다 선로에 프레임이
+**검증이 끝나면 반드시 이 줄을 지운다.** 서비스가 뜰 때마다 선로에 프레임이
 나가는 상태로 두지 않는다.
 
 ---
@@ -385,38 +385,57 @@ journalctl -u mir-dataplane@0 | grep hello
 | `MIR_LCORES` | 코어가 겹치면 두 데이터플레인이 같은 코어에서 busy-poll 한다 |
 | `MIR_IPC_SOCKET` | 소켓 경로 충돌 |
 
-`HOSTNAME` 이 특히 함정이다 — k8s 는 파드마다 다른 값을 자동 주입하지만, 한 호스트에서는
-설정하지 않으면 데이터플레인이 `gethostname()` 으로 폴백해 **모든 인스턴스가 같은
-prefix** 를 쓰게 된다.
+`HOSTNAME` 이 특히 함정이다 — compose 는 인스턴스마다 다른 값을 넣어 주지만, 한 호스트에서
+직접 띄울 때는 설정하지 않으면 데이터플레인이 `gethostname()` 으로 폴백해 **모든
+인스턴스가 같은 prefix** 를 쓰게 된다.
 
-### 아직 해결되지 않은 제약 — hugepage 상한
+### hugepage 상한 — `MIR_MEM_MB` 로 해결됐다
 
-현재 EAL 인자에 `-m` / `--socket-mem` 이 **없다**. K 형태에서는 파드의
-`hugepages-1Gi` limit 이 인스턴스별 상한 역할을 했지만, S 형태에는 그 대응물이 없어
-**프로세스 간 hugepage 경쟁을 막을 수단이 없다.**
+인스턴스별 hugepage 상한이 없어 프로세스 간 경쟁을 막을 수단이 없던 문제는
+**애플리케이션 계층으로 옮겨 해결됐다.** `eal_args.c` 가 `MIR_MEM_MB` 를 읽어
+EAL 의 `--socket-mem` / `--socket-limit` 을 만든다.
 
-- 인스턴스 1~2개는 실무상 문제되지 않는다(DPDK 기본 동적 메모리 모드는 필요한 만큼만 잡는다).
-- 그 이상을 안정적으로 돌리려면 `eal_args.c` 에 상한 인자를 추가해야 한다 → **후속 과제**.
+```ini
+MIR_MEM_MB=4096
+```
+
+`--socket-mem` 은 기동 시 선확보이므로 hugepage 가 모자라면 **폴트 시점 SIGBUS 가
+아니라 즉시 기동 실패**로 드러난다. 이 fail-fast 성질이 상한의 핵심이다.
+NUMA 노드는 `/sys` 에서 읽어 그 프로세스의 cpuset 이 걸친 소켓에만 배정한다.
+
+> 설정하지 않으면 기동 로그에 경고가 남는다. 인스턴스를 여러 개 띄운다면
+> **반드시 설정할 것** — 먼저 뜬 쪽이 호스트 hugepage 를 전부 가져간다.
 
 ---
 
-## 7. mir-control 은 왜 아직 못 띄우는가
+## 7. mir-control — 이제 오케스트레이터 없이 뜬다
 
-제어부는 현재 k8s 를 전제로 만들어져 있다.
+제어부의 k8s 전제는 제거됐다. 붙을 대상은 **함대 설정**이 알려 준다.
 
-- [cmd/mir-control/main.go](../control/cmd/mir-control/main.go) 가 기동 시 `k8s.New()` 를
-  호출하고, in-cluster 설정도 kubeconfig 도 없으면 `os.Exit(1)` 한다
-- [internal/registry](../control/internal/registry/registry.go) 는 headless Service 의
-  **EndpointSlice** 를 조회해 피어를 찾는다 — k8s API 가 없으면 대상이 0개다
-- REST 5개 중 4개(`capacity` / `scale` / `resources` / `restart`)가 k8s API 를 직접 호출한다
+```yaml
+# /etc/mir/fleet.yaml
+machines:
+  - name: gen-1
+    address: 127.0.0.1        # 같은 장비면 루프백
+    instances:
+      - { id: 0, port: 9100, pf: "0000:43:00.0" }
+```
 
-**필요한 후속 변경** (이번 범위 아님)
+```bash
+MIR_FLEET_CONFIG=/etc/mir/fleet.yaml MIR_INSECURE=1 ./mir-control
+```
 
-1. `registry` 에 정적 피어 목록 백엔드 추가 — `MIR_DATAPLANE_ENDPOINTS=127.0.0.1:9100,...`
-2. `mir-control` 이 오케스트레이터 없이 뜰 수 있게 `k8s.New()` 를 선택적으로
-3. k8s 전용 REST 4종은 S 모드에서 **501 로 명시적으로 거절** — 조용히 성공을 가장하지 않는다
+- `registry` 가 `Resolver` 인터페이스를 받고 함대 설정이 그걸 구현한다.
+- 한 장비 안에서만 돌면 `MIR_INSECURE=1` 로 평문을 써도 된다. **장비 경계를
+  넘으면 mTLS 가 필요하다** (DEPLOYMENT.md 4절).
+- 개수·리소스 조정 REST 는 **제거됐다.** 라이프사이클은 systemd 가 소유하고
+  제어부는 관측만 한다 — 근거는 `control/internal/api` 패키지 주석.
 
-그때까지 S 형태의 운용 창구는 `systemctl` · `journalctl` · `grpcurl` 이다.
+남는 제약: `HOSTNAME` 을 인스턴스마다 다르게 주고 함대 설정의
+`<machine>-dp<id>` 와 일치시켜야 한다. 어긋나면 전부 `unreachable` 로 보인다.
+
+S 형태의 운용 창구는 `systemctl` · `journalctl` · `grpcurl` 과
+제어부의 `/api/dataplanes` 다.
 
 ---
 
@@ -428,7 +447,7 @@ sudo systemctl stop   mir@1.target      # 제거
 sudo systemctl restart mir-dataplane@0  # 코어/장치 변경 후 (env 파일 수정 뒤)
 ```
 
-**무중단 변경은 S 형태에서도 불가능하다.** k8s 의 Pod 불변성이나 in-place resize 제약과
+**무중단 변경은 S 형태에서도 불가능하다.** 컨테이너 spec 불변성이나 in-place resize 제약과
 무관하게, `rte_eal_init` 이 lcore 집합을 프로세스 생존 기간 동안 고정하기 때문이다
 (REQUIREMENTS 4-3-3 의 제약 3). 코어를 바꾸려면 프로세스를 다시 띄워야 하고,
 진행 중인 시나리오는 중단된다.
@@ -458,7 +477,7 @@ DPDK 자체를 지우려면 빌드 디렉터리에서 `sudo ninja -C build unins
 
 ## 10. 트러블슈팅 (S 형태 전용)
 
-k8s 관련 증상은 [DEPLOYMENT.md](DEPLOYMENT.md) 8절에 있고, 여기에는 단독 실행에서만
+컨테이너 관련 증상은 [DEPLOYMENT.md](DEPLOYMENT.md) 7절에 있고, 여기에는 단독 실행에서만
 나타나는 것만 적는다.
 
 | 증상 | 원인 | 조치 |
@@ -478,5 +497,5 @@ k8s 관련 증상은 [DEPLOYMENT.md](DEPLOYMENT.md) 8절에 있고, 여기에는
 ## 관련 문서
 
 - [REQUIREMENTS.md](REQUIREMENTS.md) — 4-3-5 절이 이 형태의 설계 근거
-- [DEPLOYMENT.md](DEPLOYMENT.md) — k8s(K) 형태 배포. hello packet 검증 절차(5절 3-1단계) 포함
+- [DEPLOYMENT.md](DEPLOYMENT.md) — Compose(D) 형태 배포. hello packet 검증 절차(6절 6단계) 포함
 - [deploy/host/10-kernel-cmdline.md](../deploy/host/10-kernel-cmdline.md) — 호스트 커널 설정 (공통)

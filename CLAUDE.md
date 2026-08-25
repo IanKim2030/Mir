@@ -5,7 +5,7 @@ PCAP을 그대로 재현해 비정상 handshake를 포함한 프로토콜 동작
 리눅스 기반 도구.
 
 **성능 보장 단위는 PF 하나다.** 지원 속도 **1G / 10G / 100G**, PF 개수 **N 은 장비가
-허용하는 만큼 확장**되며 총 대역은 `PF 라인레이트 × N`. PF 하나당 파드 하나라
+허용하는 만큼 확장**되며 총 대역은 `PF 라인레이트 × N`. PF 하나당 인스턴스 하나라
 **NIC을 늘리는 데 코드 변경이 없다** — 코어·hugepage·PCIe 슬롯만 N배로 커진다.
 
 | PF 속도 | 64B 라인레이트 | PMD | 위치 |
@@ -21,7 +21,7 @@ PCAP을 그대로 재현해 비정상 handshake를 포함한 프로토콜 동작
 프레임은 존재할 수 없다. IPv6 도 지원 범위이며 최소 78B 라 pps 가 약 14% 낮으므로,
 IPv4 기준을 만족하면 자동으로 충족된다.
 
-검증기는 목표기의 1/10 스케일이지만 **PF 4개 = 파드 4개** 구조가 동일하다
+검증기는 목표기의 1/10 스케일이지만 **PF 4개 = 인스턴스 4개** 구조가 동일하다
 → [장비 2단 구성](#장비--검증기와-목표기-2단-구성).
 
 > ⚠️ **전제**: 대상은 항상 본인 소유/테스트 승인된 장비. 제3자 IP 대상 트래픽 생성은 범위 밖.
@@ -36,10 +36,10 @@ IPv4 기준을 만족하면 자동으로 충족된다.
 [React + TypeScript GUI]
         │ WebSocket / REST
         ▼
-[제어부 파드]  mir-control (Go) — 시나리오·규칙·집계 + k8s API로 개수·리소스 조정
-        │ gRPC (스트리밍)
+[제어부]  mir-control (Go) — 시나리오·규칙·집계 + 함대 관측 (장비당 1개 아님, 전체 1개)
+        │ gRPC (스트리밍, mTLS) — 장비 경계를 넘을 수 있다
         ▼
-[데이터플레인 파드 × N]  ← NIC PF 하나당 파드 하나
+[데이터플레인 인스턴스 × N]  ← NIC PF 하나당 인스턴스 하나 (장비 여러 대에 걸쳐도 된다)
   ├─ agent      (Go)     사이드카. gRPC ⇄ unix socket 릴레이. 공유 풀 코어
   └─ dataplane  (C/DPDK) NIC bind·패킷 빌더·TX/RX·실시간 판정. 배타 코어
 ```
@@ -53,9 +53,14 @@ IPv4 기준을 만족하면 자동으로 충족된다.
 
 **판정 위치**: µs 단위 실시간 반응(ACK 생략·SYN-ACK 즉시 판정) → C / 세션 단위 룰·오케스트레이션 → Go.
 
-**개별 패킷은 프로세스 경계를 넘지 않는다.** 파드당 148 Mpps(전체 595 Mpps)를
+**개별 패킷은 프로세스 경계를 넘지 않는다.** 인스턴스당 148 Mpps(전체 595 Mpps)를
 밖으로 내보내는 건 성립하지 않으므로 C 가 판정 결과와 요약만 올린다. 그래서 제어
 채널이 지연되거나 끊겨도 판정 정확도에 영향이 없다.
+
+이 성질이 **멀티 장비를 싸게 만든다** — 인스턴스끼리 맞출 상태가 없으므로
+장비를 늘리는 건 클러스터를 만드는 게 아니라 독립 단위를 늘리는 것이다.
+대신 장비 경계를 넘는 순간 **시계 동기(PTP)가 전제**가 된다
+→ [deploy/host/60-ptp.md](deploy/host/60-ptp.md).
 
 ## 동작 모드
 
@@ -67,7 +72,7 @@ IPv4 기준을 만족하면 자동으로 충족된다.
 
 ## 장비 — 검증기와 목표기 2단 구성
 
-같은 코드가 두 장비에서 돈다. **PF 4개 = 파드 4개** 배치가 양쪽 동일하므로
+같은 코드가 두 장비에서 돈다. **PF 4개 = 인스턴스 4개** 배치가 양쪽 동일하므로
 이식 시 바뀌는 것은 PMD 하나뿐이다.
 
 | | ② 검증기 (현재) | ③ 목표기 (**미도입** — 향후 세팅) |
@@ -124,35 +129,51 @@ IPv4 기준을 만족하면 자동으로 충족된다.
 
 | 형태 | 대상 | 오케스트레이션 | 절차 |
 |---|---|---|---|
-| **K — 베어메탈 단일 노드 k8s(k3s)** | 운영 배포, 다중 PF | k8s Deployment. 제어부가 k8s API 로 개수·리소스 조정 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| **S — 단독 실행 (k8s 없음)** | 개발·검증기, k8s 반입 불가 장비 | systemd 템플릿 유닛 + `taskset` | [INSTALL-STANDALONE.md](docs/INSTALL-STANDALONE.md) |
+| **D — Docker Compose** (정본) | 운영 배포, 다중 PF, **장비 여러 대** | 없음. 장비마다 compose, 제어부는 함대 설정으로 관측 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| **S — 단독 실행 (컨테이너 없음)** | 컨테이너조차 반입 불가한 장비 | systemd 템플릿 유닛 + `taskset` | [INSTALL-STANDALONE.md](docs/INSTALL-STANDALONE.md) |
 
-호스트 준비(VT-d·hugepage·vfio 바인딩·코어 격리)는 두 형태가 동일하고, k3s 설치
-지점부터 갈린다. S 는 K 에서 **k8s 계층만 걷어낸 것**이다. *"monolithic" 은 단일
-프로세스가 아니다* — Go 와 C 를 한 프로세스로 합치면 cgo 로 DPDK 를 부르게 되어
-아키텍처 전제가 무너진다. 합쳐지는 것은 배포 단위다.
-→ [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) 4-3-5절.
+호스트 준비(VT-d·hugepage·vfio 바인딩·코어 격리)는 두 형태가 동일하다.
+*"monolithic" 은 단일 프로세스가 아니다* — Go 와 C 를 한 프로세스로 합치면 cgo 로
+DPDK 를 부르게 되어 아키텍처 전제가 무너진다. 합쳐지는 것은 배포 단위다.
 
-**S 형태의 현재 상태**: 데이터플레인·사이드카는 코드 변경 없이 뜬다(lcore ←
-`sched_getaffinity`, 장치 ← `MIR_DEVICE_SPEC`, prefix ← `HOSTNAME`).
-**제어부는 아직 못 뜬다** — k8s 설정이 없으면 종료하고 registry 가 EndpointSlice
-전용이다. 최종 목표는 사이드카 없이 제어부가 ③ 에 직결하는 것이지만, 당분간은
-사이드카를 로컬 gRPC 로 유지한다.
+### 왜 k8s 를 쓰지 않는가
 
-### K 형태 — 계층 경계
+초기 설계는 k3s 였고 Phase 0 에서 매니페스트까지 작성했으나, 코드와 대조한 뒤
+접었다. 근거 셋:
 
-컨테이너화의 목적은 성능이 아니라 **재현성**이다. hugepage 크기·IOMMU·vfio
-바인딩·CPU 격리는 전부 호스트 커널에 묶여 있어 컨테이너가 숨겨주지 못하므로,
-"호스트가 해야 하는 것"과 "k8s 가 해주는 것"의 경계를 문서로 못박아 둔다.
+1. **스케줄러가 정할 게 없다.** 데이터플레인은 PF 가 꽂힌 장비에서만 돌 수 있어
+   배치를 PCIe 슬롯이 이미 결정했다. k8s 는 워크로드가 노드 간 **교체 가능**할 때
+   값을 하는데 여기선 정의상 교체 불가능하다. 장비가 늘어도 마찬가지다.
+2. **CPU Manager 가 명시적 cpuset 보다 못하다.** `cpu: "5"` 는 kubelet 이 코어를
+   골라 주는 방식이라 어느 코어인지 미리 알 수 없고, kubelet 은 `isolcpus` 를
+   모른다 — 격리 집합과 `reserved-cpus` 를 서로 다른 파일에서 손으로 맞춰야 했다.
+   지금은 `isolcpus` 가 **유일한 출처**이고 compose 의 `cpuset` 이 그걸 그대로 쓴다.
+3. **device plugin 이 없는 문제를 만든다.** PF↔인스턴스 바인딩이 임의가 되어
+   축소 시 어느 PF 가 빠질지 알 수 없다. `MIR_DEVICE_SPEC=pci:<BDF>` 로 직접
+   지정하면 고정되고, 이 경로는 이미 구현돼 있었다.
+
+**컨테이너는 유지한다** — 목적이 성능이 아니라 **재현성**이기 때문이다. 검증기의
+gcc 9.4 는 `-march=x86-64-v3` 를 모른다. 바꾼 것은 오케스트레이션 층 하나다.
+
+부수 효과로 제어부의 k8s 의존이 사라져 Go 의존성이 직접 3개로 줄었고,
+`internal/k8s` 와 RBAC 표면이 통째로 없어졌다.
+
+### 계층 경계
+
+hugepage 크기·IOMMU·vfio 바인딩·CPU 격리는 전부 호스트 커널에 묶여 있어
+컨테이너가 숨겨주지 못한다. 경계를 못박아 둔다.
 
 - **NIC 할당**: PF 전체를 vfio-pci 로 패스스루 (VF 는 spoof check 에 막혀
-  L2 임의조작·src IP 스푸핑이 불가능하다)
-- **코어 배치**: `dataplane` 컨테이너는 cpu 를 **정수**로 요청해 배타 코어를 받고,
-  `agent` 는 **분수**(`500m`)로 요청해 공유 풀에 남는다. 이 한 줄이 사이드카의
-  gRPC 스레드가 busy-poll 코어를 침범하지 못하게 만든다
-- **개수·리소스 조정**: 제어부가 k8s API 로 수행. 무중단은 불가능하고
-  (Pod 불변성 + static CPU manager 에서 in-place resize 불가 + DPDK lcore 고정),
-  **재시작 범위를 데이터플레인으로만 한정**하는 것이 목표다
+  L2 임의조작·src IP 스푸핑이 불가능하다). `MIR_DEVICE_SPEC` 으로 BDF 직접 지정
+- **코어 배치**: `dataplane` 은 `cpuset` 으로 격리 코어에 고정하고, `agent` 는
+  cpuset 없이 공유 풀에 남긴다. 컨테이너가 분리돼 있어 사이드카의 gRPC 스레드가
+  busy-poll 코어에 올라갈 물리적 경로가 없다
+- **메모리 상한**: 오케스트레이터가 걸어 주던 인스턴스별 hugepage 한도가 없으므로
+  `MIR_MEM_MB` 로 EAL 에 직접 건다. 없으면 먼저 뜬 인스턴스가 hugepage 를 전부
+  가져가고 나머지가 기동에 실패한다
+- **개수·리소스 조정**: compose 파일과 `.env` 가 소유한다. **제어부는 관측만 한다** —
+  라이프사이클을 조종하려면 장비마다 `docker.sock`(root 등가)을 받아야 하는데,
+  GUI 가 웹으로 노출되는 구조에서 후퇴이고 멀티 장비에서는 성립하지도 않는다
 
 절차와 트러블슈팅은 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
@@ -176,12 +197,12 @@ Mir/
 │  └─ src/  eal_args · stats · ipc_server · port · tx_hello · pcap_reader · main
 ├─ control/             ← 단일 Go 모듈(module mir). 두 바이너리가 스키마 공유
 │  ├─ cmd/mir-agent/    ← 사이드카 (릴레이)
-│  ├─ cmd/mir-control/  ← 제어부 (조정 API + 사이드카 연결 관리)
-│  └─ internal/  pb · ipc · agent · registry · k8s · api
+│  ├─ cmd/mir-control/  ← 제어부 (함대 관측 + REST)
+│  └─ internal/  pb · ipc · agent · registry · fleet · mtls · api
 └─ deploy/
-   ├─ host/             ← 커널 파라미터 · vfio 바인딩 · k3s 설치 · 사전점검
+   ├─ host/             ← 커널 파라미터 · vfio 바인딩 · docker 설치 · 인증서 · PTP
    ├─ docker/           ← Dockerfile 3개 (빌드 컨텍스트는 저장소 루트)
-   └─ k8s/  base + overlays/baremetal
+   └─ compose/          ← 데이터플레인/제어부 compose · .env 예제 · 함대 설정 예제
 ```
 
 - **상세 요구사항·설계·미확정 이슈**의 단일 출처(Source of Truth)는
@@ -192,15 +213,20 @@ Mir/
 
 ## 현재 상태
 
-- **Phase 0 인프라 골격 완성** — 호스트 준비 스크립트, 3개 이미지, k8s 매니페스트,
-  제어 채널(C ⇄ 사이드카 ⇄ 제어부), 개수·리소스 조정 API 까지 작성됨.
+- **Phase 0 인프라 골격 완성** — 호스트 준비 스크립트, 3개 이미지, compose 구성,
+  제어 채널(C ⇄ 사이드카 ⇄ 제어부), 함대 관측 API 까지 작성됨.
+- **k8s → Docker Compose 전환 완료 (코드·문서)** — `deploy/k8s` 와
+  `control/internal/k8s` 제거, 함대 설정(`internal/fleet`)·mTLS(`internal/mtls`)
+  추가, `registry` 를 `Resolver` 인터페이스로 추상화. **장비 여러 대를 한 제어부가
+  묶는 구성이 요구사항에 포함됐다.**
 - **Phase 1 hello packet 작성됨** — 포트 구성·start·링크 확인(`port.c`)과
   EtherType 0x88B5 프레임 송신(`tx_hello.c`). `MIR_HELLO_TX_COUNT` 로만 켜지며
-  기본값은 비활성이라 파드 기동만으로 선로에 프레임이 나가지 않는다.
+  기본값은 비활성이라 기동만으로 선로에 프레임이 나가지 않는다.
   텔레메트리의 포트별 수치는 이제 NIC 하드웨어 카운터(`rte_eth_stats_get`)에서 온다.
 - **실물 하드웨어에서 아직 미검증** — 로컬에 DPDK 툴체인이 없어 C 코드는
-  컴파일 검증조차 되지 않았다. 확인된 것은 Go 빌드/vet 과 kustomize 렌더뿐이다.
-  실물 검증 절차는 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 5절 3·3-1단계.
+  컴파일 검증조차 되지 않았다. 확인된 것은 Go 빌드/vet/테스트, compose·함대 설정
+  YAML 파싱, 인증서 발급 스크립트 실행뿐이다.
+  실물 검증 절차는 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 6절.
 - **검증기 하드웨어 점검 완료(2026-08-01)** — `10.10.40.121` 은 DPDK 가용 장비로
   확인됐다(X710 4포트 i40e, 베어메탈, `CONFIG_VFIO_PCI=y`). 다만 **호스트 준비가
   전혀 안 된 상태**다: VT-d 비활성 · HugePages 0 · DPDK/meson/ninja/libnuma-dev
@@ -212,7 +238,12 @@ Mir/
 
 ## 미확정 이슈 (요약)
 
-~~서버 사양~~(확정 — 위 장비 표) · 대상 환경(직결/루프백/스위치) · 판정 규칙 상세 ·
-TLS 세부(1.2/1.3, 클라이언트 인증서) · PCAP 재현 세부(포맷/타이밍/구간) ·
-단독 실행 형태(S)의 범위 · 범위 밖 항목.
+~~서버 사양~~(확정 — 위 장비 표) · ~~운영 반입 정본 형태~~(확정 — Docker Compose) ·
+대상 환경(직결/루프백/스위치) · 판정 규칙 상세 · TLS 세부(1.2/1.3, 클라이언트 인증서) ·
+PCAP 재현 세부(포맷/타이밍/구간) · **PTP 허용 오차**(판정 규칙이 정해져야 산출된다) ·
+범위 밖 항목.
 → 전체 목록은 요구사항 정의서 7절 참고.
+
+**멀티 장비 관련해 새로 열린 것**: 조율된 시작(`start_at_ns`)은 proto 에 자리만
+잡혀 있고 송신 엔진(Phase 2)과 함께 구현된다. 인증서 갱신·배포 절차도 아직
+수동이다.
