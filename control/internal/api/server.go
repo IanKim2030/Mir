@@ -57,6 +57,9 @@ func (s *Server) Routes() http.Handler {
 	// 수신 판정 (Phase 3)
 	mux.HandleFunc("GET /api/events", s.listEvents)
 
+	// 실시간 스트림 (Phase 6c) — SSE 로 스냅샷 푸시.
+	mux.HandleFunc("GET /api/stream", s.stream)
+
 	// GUI (Phase 6) — 내장 React SPA. "/" 는 catch-all 이라 위의 구체적
 	// 패턴(/api·/healthz·/readyz)이 먼저 잡힌다(Go 1.22 mux 우선순위).
 	mux.Handle("/", webui.Handler())
@@ -213,21 +216,17 @@ type capacityResponse struct {
 }
 
 // capacity 는 장비 단위 롤업이다. 인스턴스 단위 상세는 /api/dataplanes.
-func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
+// capacityData 는 장비 단위 롤업을 계산한다. REST 핸들러와 SSE 스트림이 공유한다.
+func (s *Server) capacityData(views []instanceView) capacityResponse {
 	byName := map[string]instanceView{}
-	for _, v := range s.instanceViews() {
+	for _, v := range views {
 		byName[v.Name] = v
 	}
 
 	resp := capacityResponse{Machines: make([]machineView, 0, len(s.fleet.Machines))}
-
 	for mi := range s.fleet.Machines {
 		m := &s.fleet.Machines[mi]
-		mv := machineView{
-			Name:     m.Name,
-			Address:  m.Address,
-			Expected: len(m.Instances),
-		}
+		mv := machineView{Name: m.Name, Address: m.Address, Expected: len(m.Instances)}
 		for _, in := range m.Instances {
 			if byName[in.Name].State == stateOK {
 				mv.Ready++
@@ -237,8 +236,11 @@ func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
 		resp.Ready += mv.Ready
 		resp.Machines = append(resp.Machines, mv)
 	}
+	return resp
+}
 
-	writeJSON(w, http.StatusOK, resp)
+func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.capacityData(s.instanceViews()))
 }
 
 func (s *Server) listDataplanes(w http.ResponseWriter, _ *http.Request) {

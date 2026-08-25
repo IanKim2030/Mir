@@ -345,7 +345,7 @@ Tier 3  --vdev net_af_packet0,iface=eth2   ← 준비물 없음. --no-huge 가�
 | **5b** TLS + HTTPS (mbedTLS) | ✅ | 세션 엔진 + `tls.c`(mbedTLS 3.6) | ② |
 | **6a** GUI 라이브 대시보드 | ✅ | `web/`(React+TS) + `internal/webui`(go:embed) | REST |
 | **6b** React Flow 시나리오 빌더 | ✅ | `web/src/Builder.tsx` (@xyflow/react) | REST |
-| **6c** WS 스트리밍 · uPlot 심화 | ⬜ | `web/` 확장 + `internal/api` WS | REST/WS |
+| **6c** 실시간 스트리밍(SSE) · uPlot 심화 | ✅ | `internal/api/stream.go`(SSE) + `web/` | SSE/REST |
 | **7** 400G 튜닝 | ⬜ | lcore 스케일링 · 배치 · NUMA/캐시. **목표기 도입 전제** | — |
 | **8** 클라우드 이식 | ⬜ | `device_spec` 의 `MAC_ADDR` 경로 · PMD 추가 | — |
 

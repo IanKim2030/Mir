@@ -28,9 +28,9 @@ type eventsResponse struct {
 //
 // 이벤트는 데이터플레인에서 이미 레이트 제한돼 올라온 **이상동작 표본**이다.
 // 정확한 수는 /api/dataplanes 의 rx 카운터에 있다 — 둘의 역할이 다르다.
-func (s *Server) listEvents(w http.ResponseWriter, _ *http.Request) {
+// eventsData 는 최근 이벤트를 외부 표현으로 만든다. REST 핸들러와 SSE 스트림이 공유한다.
+func (s *Server) eventsData() eventsResponse {
 	events, seen := s.reg.Events()
-
 	out := eventsResponse{Seen: seen, Events: make([]eventView, 0, len(events))}
 	for _, re := range events {
 		ev := re.Event
@@ -45,5 +45,9 @@ func (s *Server) listEvents(w http.ResponseWriter, _ *http.Request) {
 			Detail:   ev.Detail,
 		})
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
+}
+
+func (s *Server) listEvents(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.eventsData())
 }

@@ -74,6 +74,13 @@ export interface EventView {
 }
 export interface EventsResponse { seen: number; events: EventView[]; }
 
+// SSE /api/stream 이 한 프레임에 밀어 주는 스냅샷.
+export interface Snapshot {
+  instances: InstanceView[];
+  capacity: CapacityResponse;
+  events: EventsResponse;
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const r = await fetch(path, { headers: { Accept: 'application/json' } });
   if (!r.ok) throw new Error(`${path} → ${r.status}`);

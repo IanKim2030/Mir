@@ -5,12 +5,12 @@ import {
   EventView,
   InstanceView,
   InstanceState,
+  Snapshot,
 } from './api'
 import { TxChart } from './TxChart'
 import { Builder } from './Builder'
 
-const POLL_MS = 1000
-const HISTORY = 60 // 차트에 남길 표본 수 (초)
+const HISTORY = 120 // 차트에 남길 표본 수 (0.5s × 120 = 60s)
 
 const STATE_LABEL: Record<InstanceState, string> = {
   ok: '정상',
@@ -30,6 +30,8 @@ function fmtGbps(bps: number): string {
   if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`
   return `${(bps / 1e3).toFixed(0)} kbps`
 }
+
+const noop = () => {}
 
 interface Prev {
   t: number
@@ -55,22 +57,19 @@ export default function App() {
   const [xs, setXs] = useState<number[]>([])
   const [txHist, setTxHist] = useState<number[]>([])
   const [rxHist, setRxHist] = useState<number[]>([])
+  const [bwHist, setBwHist] = useState<number[]>([])
   const [tab, setTab] = useState<'dashboard' | 'builder'>('dashboard')
 
   const prevRef = useRef<Prev | null>(null)
 
-  const poll = useCallback(async () => {
-    try {
-      const [dps, cap, evs] = await Promise.all([
-        api.dataplanes(),
-        api.capacity(),
-        api.events(),
-      ])
-      setInstances(dps)
-      setCapacity(cap)
-      setEvents(evs.events)
-      setConnErr(null)
+  // SSE 한 프레임을 처리한다 — 인스턴스·용량·이벤트 갱신 + pps/대역 델타 + 차트.
+  const processSnapshot = useCallback((snap: Snapshot) => {
+    const dps = snap.instances
+    setInstances(dps)
+    setCapacity(snap.capacity)
+    setEvents(snap.events.events)
 
+    {
       // pps 델타
       const now = Date.now() / 1000
       const curTx: Record<string, number> = {}
@@ -88,6 +87,7 @@ export default function App() {
       const nextRates: Record<string, Rate> = {}
       let aggTx = 0
       let aggRx = 0
+      let aggTxBps = 0
       if (prev) {
         const dt = now - prev.t
         if (dt > 0) {
@@ -98,6 +98,7 @@ export default function App() {
             nextRates[name] = { txPps, rxPps, txBps }
             aggTx += txPps
             aggRx += rxPps
+            aggTxBps += txBps
           }
         }
       }
@@ -108,17 +109,26 @@ export default function App() {
         setXs((a) => [...a, now].slice(-HISTORY))
         setTxHist((a) => [...a, aggTx / 1e6].slice(-HISTORY))
         setRxHist((a) => [...a, aggRx / 1e6].slice(-HISTORY))
+        setBwHist((a) => [...a, aggTxBps / 1e9].slice(-HISTORY))
       }
-    } catch (e) {
-      setConnErr(String(e))
     }
   }, [])
 
+  // SSE 구독 — 폴링을 대체한다. EventSource 는 끊기면 표준으로 자동 재연결한다.
   useEffect(() => {
-    poll()
-    const id = setInterval(poll, POLL_MS)
-    return () => clearInterval(id)
-  }, [poll])
+    const es = new EventSource('/api/stream')
+    es.onopen = () => setConnErr(null)
+    es.onmessage = (e) => {
+      try {
+        processSnapshot(JSON.parse(e.data) as Snapshot)
+        setConnErr(null)
+      } catch (err) {
+        setConnErr(String(err))
+      }
+    }
+    es.onerror = () => setConnErr('스트림 재연결 중…')
+    return () => es.close()
+  }, [processSnapshot])
 
   const active = instances.find((d) => d.handshake && d.handshake.sessions > 0)?.handshake
 
@@ -151,10 +161,10 @@ export default function App() {
       </header>
 
       {tab === 'builder' ? (
-        <Builder instances={instances} onStarted={poll} />
+        <Builder instances={instances} onStarted={noop} />
       ) : (
         <>
-      <ScenarioBar instances={instances} onChange={poll} />
+      <ScenarioBar instances={instances} onChange={noop} />
 
       <div className="grid">
         {/* 인스턴스 인벤토리 */}
@@ -190,16 +200,27 @@ export default function App() {
         </section>
 
         {/* 영역 1 — 송신 카운터 */}
-        <section className="card span2">
-          <h2>송신 카운터</h2>
+        <section className="card">
+          <h2>송신 카운터 — 처리량 (Mpps)</h2>
           <TxChart
             xs={xs}
-            title="함대 합산 처리량 (Mpps)"
+            title="함대 합산 pps"
             unit="Mpps"
             series={[
               { label: 'TX', stroke: '#4fd1c5', values: txHist },
               { label: 'RX', stroke: '#f6ad55', values: rxHist },
             ]}
+          />
+        </section>
+
+        {/* 영역 1b — 대역 */}
+        <section className="card">
+          <h2>송신 대역 (Gbps)</h2>
+          <TxChart
+            xs={xs}
+            title="함대 합산 대역 (on-wire 아님, L2)"
+            unit="Gbps"
+            series={[{ label: 'TX', stroke: '#63b3ed', values: bwHist }]}
           />
         </section>
 
