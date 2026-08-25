@@ -238,35 +238,37 @@ Mir/
 
 ## 현재 상태
 
-- **Phase 0 인프라 골격 완성** — 호스트 준비 스크립트, 3개 이미지, compose 구성,
-  제어 채널(C ⇄ 사이드카 ⇄ 제어부), 함대 관측 API 까지 작성됨.
-- **k8s → Docker Compose 전환 완료 (코드·문서)** — `deploy/k8s` 와
-  `control/internal/k8s` 제거, 함대 설정(`internal/fleet`)·mTLS(`internal/mtls`)
-  추가, `registry` 를 `Resolver` 인터페이스로 추상화. **장비 여러 대를 한 제어부가
-  묶는 구성이 요구사항에 포함됐다.**
-- **✅ Phase 0·1 실물 검증 완료 (2026-08-25, 검증기 4 인스턴스)** — 아래 전부
-  실장비 실측이다.
-  - 인스턴스별 `lcores` 가 `.env` 의 cpuset 과 정확히 일치 (`[2-6] [7-11]
-    [12-16] [17-21]`, 겹침 없음). **오케스트레이터 없이 코어 배타 점유가 된다**
-  - hugepage 4GB × 4 = 16/16 소진. `--socket-mem` 선확보라 초과 시 즉시 기동 실패
-  - 비특권 vfio (`IOMMU type 1`), `Vector AVX2` 경로, 이미지에 C++ 런타임 부재
-  - 실패 상태 3종 재현: `unreachable` / `no-ports` / `pf-mismatch`.
-    특히 `no-ports` 는 **`connected=true` 인데 NIC 을 못 잡은 상태**를 구분해 낸다
-  - hello packet **송·수신 양단 확인**: 송신 100/100(NIC 카운터 일치) →
-    대상에서 `100 captured / 0 dropped`, seq 0~99 누락·중복 없음,
-    매직 `MIR1`·패딩·64B 프레임 전부 일치
-- **C 코드가 처음으로 컴파일·실행됐다** — gcc 15.2 + DPDK 25.11, 경고 0건.
-  `eal_args.c` 는 빌드 시스템 없이 떼어내 하네스로 단독 검증까지 했다.
-- **실물이 잡아낸 버그 8건을 고쳤다** — 코드·문서만으로는 나올 수 없던 것들이다.
-  `libatomic1` 누락(기동 실패) · stdout 블록 버퍼링(진단 유실) ·
-  vfio 바인딩이 재부팅을 못 넘김(Ubuntu 26.04 의 driverctl 패키지 파손) ·
-  `pipefail` + `grep -q` 5곳(패턴이 **맞을 때만** 실패) · 인증서 소유권 ·
-  compose 의 hello 변수 미통과 · `lsmod` 기반 vfio 검사 · `rte_eth_link_to_str`
-  실험적 API.
-- **시나리오 송신 엔진은 여전히 미구현** (Phase 2~4-1). hello 는 기동 시 1회
-  송신하는 경로 증명일 뿐 속도 제어도 다중 lcore 도 없다. `StartScenario` 는
-  성공을 가장하지 않고 "미구현" Ack 를 돌려준다.
-- `pcap_reader.h` 는 경로 기반 API 라 공유 볼륨 설계와 이미 맞물려 있다 (Phase 4-1).
+**Phase 0~6 완료. 전부 검증기(X710 4×10G) 실물 실측으로 검증됨.** Phase 7(400G
+튜닝)은 목표기 미도입이라 대기, Phase 8(클라우드)은 미착수.
+
+| Phase | 상태 | 핵심 실측 |
+|---|---|---|
+| 0 인프라 골격 | ✅ | 3개 이미지·compose·제어채널·함대 관측 API. k8s→Compose 전환 완료 |
+| 1 hello packet | ✅ | 송·수신 양단 확인(100/100, seq 무손실, 매직·패딩 일치) |
+| 2 L2~L4 고속 송신 | ✅ | **64B ~12–14 Mpps(코어 1개로 상한 도달, X710 소형프레임 HW 한계)**. 오프로드 체크섬, TSC 페이싱, 다중 lcore |
+| 3 수신 캡처+판정 | ✅ | 상시 RX 폴링 lcore, TCP 플래그 분류, SPSC 이벤트 링 |
+| 4 handshake 제어 | ✅ | SYN→SYN-ACK→(complete/half-open/RST). 대상 본드 분리 후 실측 |
+| 4-1 PCAP 리플레이 | ✅ | classic pcap + pcapng, preserve_timing(20ms 간격 <10µs 재현), loop·구간 |
+| 5a TCP 데이터경로 | ✅ | 3-way→GET→200→FIN 전 구간 패킷단위 확인. 다중 세션 동시 완주 |
+| 5b TLS/HTTPS | ✅ | mbedTLS 3.6. TLS 1.2/1.3·mTLS(클라 인증서)·서버검증 전부. 이미지 C++ 무반입 |
+| 6a GUI 대시보드 | ✅ | React+TS `go:embed` 내장, 3영역 |
+| 6b 시나리오 빌더 | ✅ | React Flow 로 L2~L7 레이어 조립→PacketSpec |
+| 6c 실시간 스트리밍 | ✅ | SSE 푸시(500ms)로 폴링 대체, uPlot Mpps·Gbps 차트 |
+
+**성능 규명 (Phase 2, 실측):** 64B TX 상한 ~12–14 Mpps 는 **X710 실리콘 한계**다 —
+워커 코어를 1→3 늘려도 평평하고(코어 1개로 이미 상한), Docker CPU 쿼터·격리와
+무관하다(스케일링·`CpuQuota=0`·`isolcpus`로 확인). 대상 커널 수신은 단일 RX 큐라
+64B 라인레이트를 못 받는다(RSS 흐름분산으로 0.5→5 Mpps). 둘 다 소프트웨어가 아니라
+HW·커널 경로의 성질이라, **64B 라인레이트 검증은 E810 목표기(Phase 7)에서** 한다.
+
+**대상 장비 상태:** `enp1s0f0` 은 Phase 4 때 `bond0` 에서 분리해 dp0 과 점대점
+(`192.168.30.1`, 정적 ARP `192.168.30.77→dp0 MAC`). 되돌리려면 대상에서
+`nmcli device set enp1s0f0 managed yes && nmcli connection up enp1s0f0`.
+
+**실물이 잡아낸 대표 버그:** `libatomic1` 누락 · vfio 바인딩 재부팅 미보존 ·
+`pipefail`+`grep -q` · TX duration 만료 후 running 잔류 · RX-상시 × TX self-reap
+교착 · 오프로드 체크섬 pseudo-header 미주입 · replay `loop=0` 무한반복 ·
+handshake TIME_WAIT(같은 4-tuple 재접속) — 전부 코드·문서만으로는 안 나온 것들.
 
 ## 미확정 이슈 (요약)
 
