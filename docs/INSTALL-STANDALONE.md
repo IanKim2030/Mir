@@ -18,9 +18,9 @@
 
 | 이 문서로 얻는 것 | 아직 못 얻는 것 |
 |---|---|
-| `mir-dataplane` 기동, NIC 포트 인식·start, 링크 확인 | **GUI** (Phase 6 미착수) |
+| `mir-dataplane` 기동, NIC 포트 인식·start, 링크 확인 | (S 형태는 컨테이너 없이 도는 최소 경로다) |
 | `mir-agent` 를 통한 gRPC 접근 (Hello / 텔레메트리) | **mir-control** — 이제 기동한다 (7절) |
-| Phase 1 hello packet 송신 검증 | 시나리오 송신 엔진 (Phase 2~4-1 미구현) |
+| 모드 A/B/C 송신·세션·리플레이 (Phase 2~5b 구현됨) | GUI 는 D 형태(제어부)에서 (Phase 6) |
 
 즉 이 단계의 운용 창구는 `systemctl` + `journalctl` + `grpcurl` 이다.
 
